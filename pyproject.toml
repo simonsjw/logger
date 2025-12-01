@@ -10,6 +10,15 @@ maintainers = [
 description = "Custom logging module with file rotation, gzip compression, and optional PostgreSQL integration."
 keywords = ["logging", "rotation", "gzip", "postgresql", "asyncpg"]
 readme = "README.md"
+license = {text = "MIT License"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Logging",
+]
 requires-python = ">=3.12"
 dependencies = [
   "python-dotenv",
@@ -22,6 +31,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["logger*"]                              # Explicit to avoid accidental inclusion of non-package files
+
+[tool.setuptools.package-data]
+"*" = ["*.pyi"]                                    # Include type stubs like __init__.pyi
 
 [tool.basedpyright]
 # basedpyright settings
@@ -29,7 +42,6 @@ where = ["src"]
 typeCheckingMode = "recommended"                   # The recommended setting collection.
 pythonVersion = "3.12"
 pythonPlatform = "Linux"
-defineConstant = { LOG_FILE_PATH = true }          # Indicates LOG_FILE_PATH is defined; add others like LOG_MAX_SIZE if needed
 reportAny = false                                  # Don't flag types set to Any.
 reportExplicitAny = false
 reportUnknownVariableType = false
@@ -37,6 +49,13 @@ reportUnknownArgumentType = false
 reportUnknownMemberType = true
 reportUnknownParameterType = true
 reportMissingParameterType = true
+
+[tool.basedpyright.defineConstant]  # Sub-table for multiple constants (valid multi-line TOML); should be set up in .env file in project using logger.
+LOG_FILE_PATH = true
+LOG_MAX_SIZE = true  # 10MB default
+LOG_BACKUP_COUNT = true
+LOG_LEVEL = true
+
 
 [tool.ruff]
 # ruff settings

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
 """
-Configurable logging module with rotating file handlers and gzip compression.
+Configurable logging module with rotating file handlers and gzip compression, or PostgreSQL integration via pyPg.
 
 This module provides a setup function for initialising a logger that writes to
-rotating files with custom timestamp formatting (including microseconds). It
-supports configuration via environment variables loaded from a .env file (using
-python-dotenv), falling back to defaults if not set. Use this for applications
-requiring precise, compressed, and size-managed logging without database
-integration.
+rotating files with custom timestamp formatting (including microseconds) or to a PostgreSQL database
+using the shared connection pool from pyPg.pgPool. It supports configuration via environment variables
+loaded from a .env file (using python-dotenv), falling back to defaults if not set. Use this for applications
+requiring precise, compressed, and size-managed logging, with optional database integration via pyPg.
 
 Notes
 -----
@@ -16,6 +15,7 @@ Notes
 - LOG_FILE_PATH determines the log file location; defaults to a 'logs' directory
   relative to this module's parent.
 - Rotation compresses old logs to .gz format to save space.
+- For PostgreSQL logging, uses pyPg's shared pgPool; creates 'logs' table if missing.
 - Designed for use in the 'grok' conda environment; assumes python-dotenv is
   installed.
 
@@ -38,8 +38,9 @@ Examples
 >>> log = logger.setup_logger()
 >>> log.info("Application started")
 
-# Log to Postgres
-from logger import ResolvedSettingsDict, setup_logger
+# Log to Postgres (using pyPg settings)
+from pyPg.postgres_types import ResolvedSettingsDict
+from logger import setup_logger
 
 # Define connection settings (replace with your actual DB details)
 settings: ResolvedSettingsDict = {
@@ -75,7 +76,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TypedDict, override
 
-import asyncpg
 from dotenv import load_dotenv
 
 # Load environment variables from .env if present
@@ -144,24 +144,21 @@ class PostgresHandler(logging.Handler):
     """
     Custom logging handler for inserting logs into a PostgreSQL table.
 
-    Uses asyncpg for asynchronous inserts via a connection pool. Assumes the 'log'
-    table exists with columns: datetime (timestamp), level (text), app (text),
-    name (text), message (text), obj (jsonb). Connection is established lazily
-    on init.
+    Uses the shared asyncpg pool from pyPg.pgPool for asynchronous inserts. Assumes the 'logs'
+    table exists with columns: tStamp (timestamp with time zone), loglvl (text), logger (text),
+    message (text), obj (jsonb). Pool is accessed from pgPool.instance().
 
     Notes
     -----
-    - 'app' uses record.name (logger name); 'name' uses record.funcName.
+    - 'logger' uses record.name.
     - 'obj' pulls from record extras if present (e.g., extra={'obj': dict}),
       serialised to JSON; else None.
-    - Pool is created synchronously via asyncio.run_until_complete for simplicity
-      in sync contexts.
-    - Only uses connection params from settings; ignores TABLESPACE/EXTENSIONS.
+    - Assumes pgPool is initialised (e.g., via setup_logger); uses shared pool.
+    - Only performs inserts; no pool creation here.
 
     Parameters
     ----------
-    settings : ResolvedSettingsDict
-        Dictionary with DB connection details.
+    None (uses shared pgPool)
 
     Returns
     -------
@@ -170,37 +167,15 @@ class PostgresHandler(logging.Handler):
     Raises
     ------
     RuntimeError
-        If pool creation or insert fails (e.g., connection refused); check
-        settings and DB availability.
+        If pgPool not initialised or insert fails (e.g., connection issues).
     """
 
-    def __init__(self, settings: ResolvedSettingsDict) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.settings = settings
-        self.pool: asyncpg.Pool | None = None
+        import asyncpg  # Lazy import to avoid cycles
+        from pyPg.pgPool import pgPool  # Lazy import
         loop = asyncio.get_event_loop()
-        self.pool = loop.run_until_complete(self._create_pool())
-
-    async def _create_pool(self) -> asyncpg.Pool:
-        """
-        Asynchronous pool creation helper.
-
-        Returns
-        -------
-        asyncpg.Pool
-            Configured connection pool.
-        """
-        user = self.settings["DB_USER"]
-        host = self.settings["DB_HOST"]
-        port = self.settings["DB_PORT"]
-        db = self.settings["DB_NAME"]
-        password = self.settings.get("PASSWORD")
-
-        dsn = f"postgresql://{user}@{host}:{port}/{db}"
-        if password:
-            dsn = f"postgresql://{user}:{password}@{host}:{port}/{db}"
-
-        return await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+        self.pool = loop.run_until_complete(pgPool.instance().pool)
 
     def emit(self, record: LogRecord) -> None:
         """
@@ -211,8 +186,6 @@ class PostgresHandler(logging.Handler):
         record : LogRecord
             The log record to emit.
         """
-        if self.pool is None:
-            raise RuntimeError("Pool not initialised")
         loop = asyncio.get_event_loop()
         loop.run_until_complete(self._async_emit(record))
 
@@ -225,28 +198,24 @@ class PostgresHandler(logging.Handler):
         record : LogRecord
             The log record to insert.
         """
+        import asyncpg  # Lazy import
         dt = datetime.fromtimestamp(record.created)
         level = record.levelname
-        app = record.name
-        name = record.funcName
+        logger_name = record.name
         message = record.getMessage()
         obj = json.dumps(getattr(record, "obj", None)) if hasattr(record, "obj") else None
 
         query = """
-            INSERT INTO log (datetime, level, app, name, message, obj)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO logs ("tStamp", loglvl, logger, message, obj)
+            VALUES ($1, $2, $3, $4, $5)
         """
-
         async with self.pool.acquire(timeout=10) as conn:  # type: asyncpg.Connection
-            await conn.execute(query, dt, level, app, name, message, obj)
+            _ = await conn.execute(query, dt, level, logger_name, message, obj)
 
     def close(self) -> None:
         """
-        Close the pool on handler shutdown.
+        No-op for close; shared pool is not closed here (use pgPool.close() at shutdown).
         """
-        if self.pool:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self.pool.close())
         super().close()
 
 
@@ -293,6 +262,116 @@ def rotator(source: str | Path, dest: str | Path) -> None:
     os.remove(source)
 
 
+async def setup_postgres_logging(settings: ResolvedSettingsDict) -> None:
+    """
+    Asynchronous setup for PostgreSQL logging infrastructure using pyPg tools.
+
+    Ensures tablespace, database, extensions, and 'logs' table exist, creating them if missing.
+    Initialises pgPool if not already done. Replicates incremental setup logic from pyPg's setup_db.py
+    for consistency, but tailored to logging needs.
+
+    Parameters
+    ----------
+    settings : ResolvedSettingsDict
+        Resolved PostgreSQL connection settings.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    asyncpg.PostgresError
+        On connection or execution failures; caller should handle retries.
+    """
+    import asyncpg
+    from pyPg.pgPool import pgPool
+    from pyPg.postgres_types import SettingsDict
+
+    # Ensure tablespace path exists
+    if settings["TABLESPACE_PATH"]:
+        Path(settings["TABLESPACE_PATH"]).mkdir(parents=True, exist_ok=True)
+
+    # Connect to 'postgres' DB for TS/DB creation (like in setup_db.py)
+    dsn = f"postgres://{settings['DB_USER']}:{settings['PASSWORD']}@{settings['DB_HOST']}:{settings['DB_PORT']}/postgres"
+    conn = await asyncpg.connect(dsn)
+    try:
+        # Tablespace
+        exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname = $1)",
+            settings["TABLESPACE_NAME"],
+        )
+        if not exists:
+            _ = await conn.execute(
+                f"CREATE TABLESPACE {settings['TABLESPACE_NAME']} LOCATION '{settings['TABLESPACE_PATH']}'"
+            )
+
+        # Database
+        exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+            settings["DB_NAME"],
+        )
+        if not exists:
+            _ = await conn.execute(
+                f"CREATE DATABASE {settings['DB_NAME']} OWNER {settings['DB_USER']} TABLESPACE {settings['TABLESPACE_NAME']}"
+            )
+    finally:
+        await conn.close()
+
+    # Initialise pgPool if not already (using converted settings)
+    try:
+        _ = pgPool.instance()
+    except RuntimeError:
+        default_settings: SettingsDict = {
+            "db_user": settings["DB_USER"],
+            "db_host": settings["DB_HOST"],
+            "db_port": settings["DB_PORT"],
+            "db_name": settings["DB_NAME"],
+            "password": settings.get("PASSWORD", ""),
+            "tablespace_name": settings["TABLESPACE_NAME"],
+            "tablespace_path": settings.get("TABLESPACE_PATH"),
+            "extensions": settings.get("EXTENSIONS"),
+        }
+        pgPool.init(default_settings=default_settings)
+
+    # Now use pool for extensions and table
+    pool = await pgPool.instance().pool
+    async with pool.acquire() as conn:
+        # Install missing extensions (like in setup_db.py)
+        extentions_settings = settings.get("EXTENSIONS", [])
+        if extentions_settings:
+            for ext in extentions_settings:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)",
+                    ext,
+                )
+                if not exists:
+                    await conn.execute(f"CREATE EXTENSION {ext}")
+
+        # Create 'logs' table if missing
+        exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'logs'
+            )
+            """
+        )
+        if not exists:
+            await conn.execute(
+                """
+                CREATE TABLE public.logs (
+                    idx BIGSERIAL PRIMARY KEY,
+                    "tStamp" TIMESTAMP WITH TIME ZONE NOT NULL,
+                    loglvl TEXT NOT NULL,
+                    logger TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    obj JSONB
+                );
+                """
+            )
+
+
 def setup_logger(
     logger_name: str | None = None,
     log_location: str | ResolvedSettingsDict | None = None,
@@ -303,16 +382,16 @@ def setup_logger(
     """
     Set up logging to a rotating file or PostgreSQL table with custom handling.
 
-    If LOG_LOCATION is a ResolvedSettingsDict, prefers PostgreSQL logging (using
-    asyncpg pool for inserts). Otherwise, falls back to file-based with rotation.
+    If log_location is a ResolvedSettingsDict, uses PostgreSQL logging via pyPg's shared pgPool
+    (initialises pgPool if not already done; creates infrastructure if missing). Otherwise, falls back to file-based with rotation.
     If parameters are not provided, uses environment variables or defaults.
     Avoids duplicate handlers by checking existing ones.
 
     Notes
     -----
     - For file: Log directory created relative to this module if not specified.
-    - For Postgres: Assumes 'log' table exists; inserts separate fields without
-      rotation params.
+    - For Postgres: Creates 'logs' table if missing; inserts separate fields without
+      rotation params. Initialises pgPool with provided settings if needed.
     - Timestamps include microseconds for precision in both modes.
     - 'obj' requires extra={'obj': dict} in log calls for JSONB.
 
@@ -345,11 +424,12 @@ def setup_logger(
         If log directory creation or file access fails (file mode); ensure write
         permissions.
     RuntimeError
-        If Postgres pool creation fails; check DB settings and availability.
+        If pgPool initialisation or access fails; check DB settings and availability.
 
     Examples
     --------
-    >>> from logger import setup_logger, ResolvedSettingsDict
+    >>> from logger import setup_logger
+    >>> from pyPg.postgres_types import ResolvedSettingsDict
     >>> settings: ResolvedSettingsDict = {"DB_USER": "user", "DB_HOST": "localhost", ...}
     >>> logger = setup_logger(log_location=settings)
     >>> logger.info("Test message", extra={"obj": {"key": "value"}})
@@ -364,8 +444,10 @@ def setup_logger(
 
     if not logger.handlers:
         if isinstance(log_location, dict):
-            # Postgres mode
-            handler = PostgresHandler(log_location)
+            # Postgres mode using pyPg
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(setup_postgres_logging(log_location))
+            handler = PostgresHandler()
             # No formatter needed; fields inserted directly
         else:
             # File mode (str or None)
@@ -401,4 +483,4 @@ def setup_logger(
 
     return logger
 
-#  LocalWords:  tablespace fallbacks
+#  LocalWords:  tablespace fallbacks extname

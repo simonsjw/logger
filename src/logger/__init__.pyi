@@ -6,24 +6,15 @@ Type stubs for the logger module.
 
 from logging import Formatter, Handler, LogRecord, Logger
 from pathlib import Path
-from typing import TypedDict, override
-
-class ResolvedSettingsDict(TypedDict):
-    DB_USER: str
-    DB_HOST: str
-    DB_PORT: str
-    DB_NAME: str
-    PASSWORD: str | None
-    TABLESPACE_NAME: str
-    TABLESPACE_PATH: str | None
-    EXTENSIONS: list[str] | None
+from typing import override
+from pyPg.postgres_types import ResolvedSettingsDict
 
 class CustomFormatter(Formatter):
     @override
     def formatTime(self, record: LogRecord, datefmt: str | None = ...) -> str: ...
 
 class PostgresHandler(Handler):
-    def __init__(self, settings: ResolvedSettingsDict) -> None: ...
+    def __init__(self) -> None: ...
     def emit(self, record: LogRecord) -> None: ...
     def close(self) -> None: ...
 
@@ -38,3 +29,5 @@ def setup_logger(
     backup_count: int | None = ...,
     log_level: int | None = ...,
 ) -> Logger: ...
+
+#  LocalWords:  postgres
