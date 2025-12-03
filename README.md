@@ -9,9 +9,13 @@ This module provides a flexible logging setup for Python applications, supportin
 
 Key features:
 - **File-based logging**: Rotating logs with automatic gzip compression to save space; custom timestamps including microseconds.
-- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `pyPg`'s shared connection pool; automatically creates the table (and supporting infrastructure like tablespace and database) if missing.
+- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `infopypg`'s shared connection pool; automatically creates the table (and supporting infrastructure like tablespace and database) if missing.
 - **Environment-driven configuration**: Overrides via `.env` for paths, sizes, levels, etc.
-- Designed for the `grok` conda environment; assumes dependencies like `python-dotenv`, `asyncpg`, and `pyPg` are available.
+- Designed for the `grok` conda environment; assumes dependencies like `python-dotenv`, `asyncpg`, and `infopypg` are available. 
+
+Lazy loading is employed with `infopypg` so import order is:
+- `logger`
+- `infopypg` 
 
 This logger prioritises efficiency and modularity, avoiding duplicate handlers and using asynchronous operations for database interactions to minimise blocking.
 

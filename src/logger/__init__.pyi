@@ -7,7 +7,7 @@ Type stubs for the logger module.
 from logging import Formatter, Handler, LogRecord, Logger
 from pathlib import Path
 from typing import override
-from pyPg.postgres_types import ResolvedSettingsDict
+from infopypg import ResolvedSettingsDict
 
 class CustomFormatter(Formatter):
     @override
