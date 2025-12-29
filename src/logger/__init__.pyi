@@ -1,33 +1,34 @@
-#!/usr/bin/env python3
+from logging import (
+    CRITICAL,
+    DEBUG,
+    ERROR,
+    INFO,
+    WARNING,
+    FileHandler,
+    Formatter,
+    Handler,
+    Logger,
+    StreamHandler,
+    basicConfig,
+    getLogger,
+)
 
-"""
-Type stubs for the logger module.
-"""
+from .core import query_logs as query_logs
+from .core import setup_logger as setup_logger
 
-from logging import Formatter, Handler, LogRecord, Logger
-from pathlib import Path
-from typing import override
-from infopypg import ResolvedSettingsDict
-
-class CustomFormatter(Formatter):
-    @override
-    def formatTime(self, record: LogRecord, datefmt: str | None = ...) -> str: ...
-
-class PostgresHandler(Handler):
-    def __init__(self) -> None: ...
-    def emit(self, record: LogRecord) -> None: ...
-    def close(self) -> None: ...
-
-def namer(name: str) -> str: ...
-
-def rotator(source: str | Path, dest: str | Path) -> None: ...
-
-def setup_logger(
-    logger_name: str | None = ...,
-    log_location: str | ResolvedSettingsDict | None = ...,
-    log_file_maximum_size: int | None = ...,
-    backup_count: int | None = ...,
-    log_level: int | None = ...,
-) -> Logger: ...
-
-#  LocalWords:  postgres
+__all__ = [
+    "setup_logger",
+    "query_logs",
+    "Logger",
+    "getLogger",
+    "basicConfig",
+    "Formatter",
+    "Handler",
+    "StreamHandler",
+    "FileHandler",
+    "DEBUG",
+    "INFO",
+    "WARNING",
+    "ERROR",
+    "CRITICAL",
+]
