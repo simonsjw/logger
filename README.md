@@ -5,19 +5,14 @@
 
 ## Overview
 
-This module provides a flexible logging setup for Python applications, supporting both rotating file handlers with gzip compression and integration with PostgreSQL databases via the custom `pyPg` library. It allows configuration through environment variables (loaded from a `.env` file using `python-dotenv`), with sensible defaults for file paths, rotation sizes, backup counts, and log levels.
+This module provides a flexible logging setup for Python applications, supporting both rotating file handlers with gzip compression and integration with PostgreSQL databases via the custom `infopypg` library. It uses sensible defaults for file paths, rotation sizes, backup counts, and log levels, with overrides via function parameters.
 
 Key features:
 - **File-based logging**: Rotating logs with automatic gzip compression to save space; custom timestamps including microseconds.
-- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `infopypg`'s shared connection pool; automatically creates the table (and supporting infrastructure like tablespace and database) if missing.
-- **Environment-driven configuration**: Overrides via `.env` for paths, sizes, levels, etc.
-- Designed for the `grok` conda environment; assumes dependencies like `python-dotenv`, `asyncpg`, and `infopypg` are available. 
+- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `infopypg`'s shared connection pool; lazily initialises the pool and automatically creates the table (and supporting infrastructure like tablespace and database) if missing via `setupdb`.
+- Designed for the `grok` conda environment; assumes dependencies like `asyncpg` and `infopypg` are available. 
 
-Lazy loading is employed with `infopypg` so import order is:
-- `logger`
-- `infopypg` 
-
-This logger prioritises efficiency and modularity, avoiding duplicate handlers and using asynchronous operations for database interactions to minimise blocking.
+Lazy loading is employed to avoid import cycles between `logger` and `infopypg`, with PostgreSQL setup deferred until the first log emission. This logger prioritises efficiency and modularity, avoiding duplicate handlers and using asynchronous operations for database interactions to minimise blocking.
 
 ## Installation
 
@@ -38,21 +33,19 @@ This makes the `logger` module importable in your scripts.
 ### Dependencies
 
 - Python 3.12+
-- `python-dotenv` (for `.env` loading)
-- `asyncpg` (for PostgreSQL interactions, via `pyPg`)
-- Custom `pyPg` library (assumed available in the environment; provides `pgPool`, `postgres_types`, etc.)
+- `asyncpg` (for PostgreSQL interactions, via `infopypg`)
+- Custom `infopypg` library (assumed available in the environment; provides `pgpool`, `pgtypes`, etc.)
 
 Full environment details are in `environment_grok.yml`. Linting and type-checking are configured via `pyproject.toml` (using `ruff` and `basedpyright`).
 
 ## Usage
 
-Import and set up the logger in your scripts using setup_logger with these optional arguments:
-- logger_name: str | None = None
-- log_location: str | ResolvedSettingsDict | None = None 
-- log_file_maximum_size: int | None = None
-- backup_count: int | None = None
-- log_level: int | None = None
-
+Import and set up the logger in your scripts using `setup_logger` with these optional arguments:
+- `logger_name`: str | None = None
+- `log_location`: str | ResolvedSettingsDict = "../logs/app.log" 
+- `log_file_maximum_size`: int = 10 * 1024 * 1024  # 10MB
+- `backup_count`: int = 10
+- `log_level`: int = logging.DEBUG
 
 ```python
 from logger import setup_logger
@@ -62,10 +55,11 @@ logger = setup_logger()
 logger.info("Application started.")
 ```
 
-For PostgreSQL logging, pass a `ResolvedSettingsDict` (from `pyPg.postgres_types`):
+For PostgreSQL logging, pass a `ResolvedSettingsDict` (from `infopypg.pgtypes`):
 
 ```python
-from pyPg.postgres_types import ResolvedSettingsDict
+import logging
+from infopypg.pgtypes import ResolvedSettingsDict
 from logger import setup_logger
 
 settings: ResolvedSettingsDict = {
@@ -85,22 +79,17 @@ logger.info("Info message.", extra={"obj": {"key": "value"}})
 
 ### Configuration Options
 
-- **Environment Variables** (via `.env` or system env; optional, with defaults):
-  - `LOG_FILE_PATH`: Path to log file (default: `../logs/app.log` relative to module).
-  - `LOG_MAX_SIZE`: Max size in bytes before rotation (default: 10MB).
-  - `LOG_BACKUP_COUNT`: Number of backups to keep (default: 10).
-  - `LOG_LEVEL`: Level as string (e.g., "DEBUG", "INFO"; default: "DEBUG").
-
 - **Function Parameters** (in `setup_logger`):
   - `logger_name`: Optional name for the logger (defaults to root).
   - `log_location`: File path (str) or DB settings (`ResolvedSettingsDict`).
-  - `log_file_maximum_size`: Max size (file mode only).
-  - `backup_count`: Backup count (file mode only).
-  - `log_level`: Logging level (int).
+  - `log_file_maximum_size`: Max size (file mode only; default: 10MB).
+  - `backup_count`: Backup count (file mode only; default: 10).
+  - `log_level`: Logging level (int; default: DEBUG).
 
 For PostgreSQL mode:
 - The `logs` table is created if missing with columns: `idx` (BIGSERIAL PK), `tStamp` (TIMESTAMP WITH TIME ZONE), `loglvl` (TEXT), `logger` (TEXT), `message` (TEXT), `obj` (JSONB).
-- Infrastructure (tablespace, database, extensions) is ensured incrementally using `pyPg` tools.
+- Infrastructure (tablespace, database, extensions) is ensured incrementally using `infopypg` tools.
+- Setup is lazy: Pool initialisation and table creation occur on the first log emission.
 
 ### Log Format
 
@@ -109,15 +98,31 @@ For PostgreSQL mode:
 
 To include JSON objects: Use `extra={"obj": data}` in log calls (serialised to JSONB in DB).
 
+### Querying Logs
+
+For PostgreSQL mode, query the `logs` table asynchronously using the module-level `query_logs` function:
+
+```python
+import asyncio
+from logger import query_logs
+
+async def main():
+    results = await query_logs("SELECT * FROM logs WHERE loglvl = $1 LIMIT 10", params=["INFO"])
+    print(results)  # list[dict[str, Any]]
+
+asyncio.run(main())
+```
+
+Provide `settings` if the pool is not yet initialised.
+
 ## Examples
 
 ### File Logging with Rotation
 
 ```python
-import logging
-from logger import setup_logger
+from logging import Logger, setup_logger, INFO
 
-logger = setup_logger(log_level=logging.INFO)
+logger: Logger = setup_logger(log_level=INFO)
 logger.warning("This will rotate when file exceeds max size.")
 ```
 
@@ -136,15 +141,47 @@ This inserts into the `logs` table with `obj` as JSONB.
   logger/
   ├── src/
   │   └── logger/
-  │       ├── __init__.py   # Main module code and docstring
-  │       └── __init__.pyi  # Type stubs (if applicable)
-  ├── pyproject.toml        # Config for ruff, basedpyright, etc.
+  │       ├── __init__.py   # exposed functionality for the module
+  │       ├── __init__.pyi  # Type stubs 
+  │       ├── core.py       # Implementation of the logger functionality.
+  │       ├── core.pyi      # Type stubs
+  │       ├── logs_spec.py  # SQLAlchemy model spec for logs table (used in setupdb)
+  │       └── logs_spec.py  # Type stubs
+  ├── pyproject.toml        # Config for ruff, pyrefly, etc.
   └── README.md             # This file
   ```
 
-- **Linting/Type-Checking**: Run `ruff check` and `basedpyright` from the root.
+- **Linting/Type-Checking**: Run `ruff check` and `pyrefly` from the root.
 - **Testing**: Add tests in a future `tests/` directory; currently, rely on examples in docstrings.
 
+## Full list of exposed functionality
+All elements below can be imported from logger. 
+
+```python
+from logger import(
+    # Core logging library objects: 
+        setup_logger,    # setup the logger
+        query_logs,      # query logs set up on postgres. 
+        
+    # All following objects are unchanged from the base `logger' library.
+    
+        DEBUG,           # logging levels to use in setup_logger.
+        INFO, 
+        WARNING, 
+        CRITICAL, 
+        ERROR,
+        
+        Logger,          # type for the Logger returned by `setup_logger'
+        
+    # Misc. useful objects from logging (available through logger import):
+        FileHandler,
+        Formatter,
+        Handler,
+        StreamHandler,
+        basicConfig,
+        getLogger,
+    )
+```
 ## Contributing
 
 Contributions are welcome! Please follow the code style in `__init__.py` (e.g., type hints, NumPy-style docstrings) and ensure compatibility with Python 3.12 and the `grok` environment.
@@ -155,4 +192,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-For questions or issues, contact the maintainer. Last updated: December 01, 2025.
+For questions or issues, contact the maintainer. Last updated: December 04, 2025.
