@@ -34,7 +34,7 @@ This makes the `logger` module importable in your scripts.
 
 - Python 3.12+
 - `asyncpg` (for PostgreSQL interactions, via `infopypg`)
-- Custom `infopypg` library (assumed available in the environment; provides `pgpool`, `pgtypes`, etc.)
+- Custom `infopypg` library (assumed available in the environment; provides `PgPoolManager`, `pgtypes`, etc.)
 
 Full environment details are in `environment_grok.yml`. Linting and type-checking are configured via `pyproject.toml` (using `ruff` and `basedpyright`).
 
@@ -170,16 +170,9 @@ from logger import(
         WARNING, 
         CRITICAL, 
         ERROR,
-        
+
         Logger,          # type for the Logger returned by `setup_logger'
         
-    # Misc. useful objects from logging (available through logger import):
-        FileHandler,
-        Formatter,
-        Handler,
-        StreamHandler,
-        basicConfig,
-        getLogger,
     )
 ```
 ## Contributing
