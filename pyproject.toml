@@ -11,17 +11,15 @@ license = { text = "MIT License" }
 readme = "README.md" # Specifies the file containing the long description
 requires-python = ">=3.12" # Minimum Python version required
 dependencies = [ # Lists required dependencies
-  "python-dotenv",   # For loading environment variables from .env
-  "asyncpg",         # Asynchronous PostgreSQL client
-  "sqlalchemy>=2.0", # ORM for SQL databases, version 2.0 or higher
-  "networkx>=3.0",   # For DiGraph in setupdb - Graph library, version 3.0 or higher 
+  "python-dotenv", # For loading environment variables from .env
+  "asyncpg",       # Asynchronous PostgreSQL client
 ]
 classifiers = [ # Classifiers for PyPI
   "Programming Language :: Python :: 3",    # Supports Python 3
   "Programming Language :: Python :: 3.12", # Specifically Python 3.12
   "License :: OSI Approved :: MIT License", # MIT License
   "Operating System :: POSIX :: Linux",     # For Linux systems
-  "Topic :: Database",                      # Related to databases
+  "Topic :: Logging",                       # Related to logging
 ]
 
 [project.optional-dependencies] # Optional dependency groups
