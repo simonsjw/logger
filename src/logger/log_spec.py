@@ -3,22 +3,20 @@
 Specification for logs table model.
 """
 
-from infopypg import Base
-from typing import Any
 from datetime import datetime
+from typing import Any
+
+from infopypg import Base
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Identity,
     Index,
     Text,
     func,
-    Identity,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import (
-    Mapped,
-    mapped_column
-)
+from sqlalchemy.orm import Mapped, mapped_column
 
 
 class Logs(Base):
@@ -31,6 +29,7 @@ class Logs(Base):
     - Sorting: Index on tstamp for ORDER BY.
     - JSONB: dict[str, Any] for obj (structured extra data); nullable for flexibility.
     """
+
     __tablename__: str = "logs"
 
     idx: Mapped[int] = mapped_column(
@@ -46,7 +45,25 @@ class Logs(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     obj: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
-    __table_args__ = (
+    __table_args__: tuple[Index, dict[str, bool]] = (
         Index("ix_logs_tstamp", "tstamp"),
         {"extend_existing": True},
     )
+
+    # this trigger ensures the tstamp is never null.
+    trigger_sql: str = """  
+    CREATE OR REPLACE FUNCTION set_logs_tstamp()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        IF NEW.tstamp IS NULL THEN
+            NEW.tstamp := CURRENT_TIMESTAMP;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    CREATE OR REPLACE TRIGGER logs_set_tstamp
+    BEFORE INSERT ON logs
+    FOR EACH ROW
+    EXECUTE FUNCTION set_logs_tstamp();
+    """

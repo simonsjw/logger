@@ -1,7 +1,6 @@
 from datetime import datetime as datetime
 from typing import Any
 
-from _typeshed import Incomplete
 from infopypg import Base
 from sqlalchemy.orm import Mapped as Mapped
 
@@ -13,4 +12,5 @@ class Logs(Base):
     logger: Mapped[str]
     message: Mapped[str]
     obj: Mapped[dict[str, Any] | None]
-    __table_args__: Incomplete
+    __table_args__: tuple[Index, dict[str, bool]]
+    trigger_sql: str
