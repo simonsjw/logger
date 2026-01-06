@@ -4,13 +4,7 @@ from logging import (
     ERROR,
     INFO,
     WARNING,
-    FileHandler,
-    Formatter,
-    Handler,
     Logger,
-    StreamHandler,
-    basicConfig,
-    getLogger,
 )
 
 from .core import query_logs as query_logs
@@ -20,12 +14,6 @@ __all__ = [
     "setup_logger",
     "query_logs",
     "Logger",
-    "getLogger",
-    "basicConfig",
-    "Formatter",
-    "Handler",
-    "StreamHandler",
-    "FileHandler",
     "DEBUG",
     "INFO",
     "WARNING",

@@ -21,13 +21,7 @@ from logging import (  # Re-export stdlib constants and types
     ERROR,
     INFO,
     WARNING,
-    FileHandler,
-    Formatter,
-    Handler,
     Logger,
-    StreamHandler,
-    basicConfig,
-    getLogger,
 )
 
 # Import your custom public API from core.py
@@ -43,17 +37,11 @@ from .core import query_logs, setup_logger  # noqa: F401
 __all__: list[str] = [
     "setup_logger",
     "query_logs",
-    "Logger",
-    "getLogger",
-    "basicConfig",
-    "Formatter",
-    "Handler",
-    "StreamHandler",
-    "FileHandler",
     "DEBUG",
     "INFO",
     "WARNING",
-    "ERROR",
     "CRITICAL",
+    "ERROR",
+    "Logger",
 ]
 #  LocalWords:  getLogger StreamHandler
