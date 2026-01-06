@@ -15,11 +15,11 @@ import logging
 import logging.handlers
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import debugpy
+from asyncpg import Pool, PostgresConnectionError, Record
 
 if TYPE_CHECKING:
     from infopypg.pgtypes import ResolvedSettingsDict
@@ -137,7 +137,7 @@ class PostgreSQLHandler(logging.Handler):
     """
     Async PostgreSQL logging handler.
 
-    Lazily inits pgpool and ensures logs table on first emit.
+    Lazily inits PgPoolManager  and ensures logs table on first emit.
     Inserts logs async into logs table.
 
     Parameters
@@ -160,14 +160,10 @@ class PostgreSQLHandler(logging.Handler):
         """
         Lazy setup: init pool, ensure table/infra.
         """
-
         if self._initialized:
             return
 
-        from infopypg.pgpool import pgpool
-        from infopypg.setupdb import DatabaseBuilder
-
-        pgpool.init(self.settings)  # Lazy; reuses if matching
+        from infopypg import DatabaseBuilder, PgPoolManager
 
         # Ensure infra and logs table via setupdb
         spec_path: str = script_dir + "/log_spec.py"
@@ -199,39 +195,69 @@ class PostgreSQLHandler(logging.Handler):
     async def _async_emit(self, record: logging.LogRecord) -> None:
         """
         Async insert log record.
+
+        Handles explicit tstamp to satisfy partitioning routing before defaults.
+        Uses UTC for consistency with likely server config; adjust if server timezone differs.
         """
         await self._ensure_setup()
+        from datetime import date, datetime, timezone
 
-        from infopypg.pgpool import pgpool
+        from infopypg import PgPoolManager, ensure_partition_exists
 
         obj = record.__dict__.get("obj")  # From extra={"obj": data}
-        query = """
-            INSERT INTO logs (loglvl, logger, message, obj)
-            VALUES ($1, $2, $3, $4)
-        """
-        params = [record.levelname, record.name, record.msg, obj]
+        tstamp = datetime.now(
+            timezone.utc
+        )  # Client-side now(); mimics func.now() but uses local clock.
 
-        pool = await pgpool.instance().pool
+        query = """
+            INSERT INTO logs (tstamp, loglvl, logger, message, obj)
+            VALUES ($1, $2, $3, $4, $5)
+        """
+        params = [tstamp, record.levelname, record.name, record.msg, obj]
+        pool = await PgPoolManager.get_pool(self.settings)  # Targets resolved DB
+
         async with pool.acquire() as conn:
+            # Get server current date for partition
+            server_date_row = None
+            try:
+                server_date_row: Record | None = await conn.fetchrow(
+                    "SELECT current_date AS today;"
+                )
+            except PostgresConnectionError as e:
+                print(
+                    f"database did not return the current date: {e}", file=sys.stderr
+                )  # Inline: new in 3.12.
+
+            if server_date_row is None:
+                print(f"Current date not returned. server_date_row set to None.")
+                raise ValueError
+
+            try:
+                server_date = server_date_row["today"]
+                await ensure_partition_exists(
+                    pool,
+                    "logs",
+                    target_date=server_date,
+                    partition_key="tstamp",
+                    range_interval="daily",
+                    look_ahead_days=1,
+                )
+            except Exception as e:
+                print(f"Log partition creation failed: {e}", file=sys.stderr)
+
             try:
                 await conn.execute(query, *params)
             except Exception as e:
-                # Fallback: print to stderr
-                print(
-                    f"PG log insert failed: {e}", file=sys.stderr
-                )  # new in 3.12: file=sys.stderr for print
+                print(f"PG log insert failed: {e}", file=sys.stderr)
 
 
 async def query_logs(
     query: str,
+    settings: ResolvedSettingsDict,
     params: list[Any] | None = None,
-    settings: ResolvedSettingsDict | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     Query the logs table asynchronously.
-
-    Ensures PG setup if not initialised (requires settings if not via handler).
-    Uses infopypg.loaddb.execute_query for execution.
 
     Parameters
     ----------
@@ -253,22 +279,21 @@ async def query_logs(
         If PG not initialised and no settings provided.
     """
 
-    # Ensure setup (lazy init if needed)
-    from infopypg.loaddb import execute_query
-    from infopypg.pgpool import pgpool
+    # Lazy init of infopypg.
+    from infopypg import PgPoolManager, execute_query
 
+    pool: Pool | None = None
     try:
-        await pgpool.instance().pool  # Check if initialised
+        pool = await PgPoolManager.get_pool(settings)  # Targets resolved DB
     except RuntimeError:
         if settings is None:
-            err_string: str = "PG pool not initialised; provide settings."
+            err_string: str = "PG pool not initialised; check settings."
             print(err_string, file=sys.stderr)
             raise RuntimeError(err_string)
 
-        handler = PostgreSQLHandler(settings)  # Temp for setup
-        await handler._ensure_setup()
-
-    return await execute_query(query, params=params, fetch=True)
+    if not pool is None:
+        return await execute_query(pool, query, params=params, fetch=True)
 
 
-#  LocalWords:  ValueError
+#  LocalWords:  ValueError tstamp asctime loglvl RuntimeError LogRecord async inits
+#  LocalWords:  ResolvedSettingsDict PgPoolManager
