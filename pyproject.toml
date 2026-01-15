@@ -13,6 +13,8 @@ requires-python = ">=3.12" # Minimum Python version required
 dependencies = [ # Lists required dependencies
   "python-dotenv", # For loading environment variables from .env
   "asyncpg",       # Asynchronous PostgreSQL client
+
+
 ]
 classifiers = [ # Classifiers for PyPI
   "Programming Language :: Python :: 3",    # Supports Python 3
