@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import logging
 import logging.handlers
 import os
@@ -19,24 +20,36 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import debugpy
+import nest_asyncio
 from asyncpg import Pool, PostgresConnectionError, Record
 
 if TYPE_CHECKING:
     from infopypg.pgtypes import ResolvedSettingsDict
 
+nest_asyncio.apply()
 
 script_dir: str = os.path.dirname(os.path.abspath(__file__))
 log_path: str = os.path.normpath(
     os.path.join(script_dir, "..", "..", "log", "default.log")
 )
-log_dir: str = os.path.dirname(log_path)  # logger/log
-os.makedirs(log_dir, exist_ok=True)  # creates logger/log if needed
+log_dir: str = os.path.dirname(log_path)                                                  # logger/log
+os.makedirs(log_dir, exist_ok=True)                                                       # creates logger/log if needed
+
+
+# LogEncoder is used in _async_emit below.
+class LogEncoder(json.JSONEncoder):
+    """
+    Custom encoder for log objects, falling back to str for non-serialisable types.
+    """
+
+    def default(self, o: Any) -> str:
+        return str(o)                                                                     # Fallback ensures arbitrary objects don't crash dumps.
 
 
 def setup_logger(
     logger_name: str | None = None,
     log_location: str | ResolvedSettingsDict = log_path,
-    log_file_maximum_size: int = 10 * 1024 * 1024,  # 10MB
+    log_file_maximum_size: int = 10 * 1024 * 1024,                                        # 10MB
     backup_count: int = 10,
     log_level: int = logging.DEBUG,
 ) -> logging.Logger:
@@ -86,7 +99,7 @@ def setup_logger(
             datefmt="%Y-%m-%d %H:%M:%S.%f",
         )
         handler.setFormatter(formatter)
-    else:  # Assume ResolvedSettingsDict
+    else:                                                                                 # Assume ResolvedSettingsDict
         # PG mode: custom async handler
         handler = PostgreSQLHandler(settings=log_location)
 
@@ -168,10 +181,10 @@ class PostgreSQLHandler(logging.Handler):
         # Ensure infra and logs table via setupdb
         spec_path: str = script_dir + "/log_spec.py"
         builder = DatabaseBuilder(
-            spec_path=spec_path,  # Assumes in same dir; adjust path if needed
+            spec_path=spec_path,                                                          # Assumes in same dir; adjust path if needed
             resolved_settings=self.settings,
         )
-        await builder.build()  # Incremental: creates missing TS/DB/exts/tables
+        await builder.build()                                                             # Incremental: creates missing TS/DB/exts/tables
 
         self._initialized = True
 
@@ -189,8 +202,13 @@ class PostgreSQLHandler(logging.Handler):
         Exception
             On insert failure (logged to stderr).
         """
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self._async_emit(record))
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(
+                self._async_emit(record)
+            )                                                                             # Fire-and-forget in async context
+        except RuntimeError:                                                              # No running loop (sync context, e.g., module init)
+            asyncio.run(self._async_emit(record))                                         # Run blocking in sync context
 
     async def _async_emit(self, record: logging.LogRecord) -> None:
         """
@@ -204,17 +222,21 @@ class PostgreSQLHandler(logging.Handler):
 
         from infopypg import PgPoolManager, ensure_partition_exists
 
-        obj = record.__dict__.get("obj")  # From extra={"obj": data}
+        obj: Any | None = record.__dict__.get("obj")                                      # From extra={"obj": data}
+        obj_json: str | None = (
+            json.dumps(obj, cls=LogEncoder) if obj is not None else None
+        )                                                                                 # Serialise to JSON str; None if absent.
+
         tstamp = datetime.now(
             timezone.utc
-        )  # Client-side now(); mimics func.now() but uses local clock.
+        )                                                                                 # Client-side now(); mimics func.now() but uses local clock.
 
         query = """
             INSERT INTO logs (tstamp, loglvl, logger, message, obj)
             VALUES ($1, $2, $3, $4, $5)
         """
-        params = [tstamp, record.levelname, record.name, record.msg, obj]
-        pool = await PgPoolManager.get_pool(self.settings)  # Targets resolved DB
+        params = [tstamp, record.levelname, record.name, record.msg, obj_json]
+        pool = await PgPoolManager.get_pool(self.settings)                                # Targets resolved DB
 
         async with pool.acquire() as conn:
             # Get server current date for partition
@@ -226,7 +248,7 @@ class PostgreSQLHandler(logging.Handler):
             except PostgresConnectionError as e:
                 print(
                     f"database did not return the current date: {e}", file=sys.stderr
-                )  # Inline: new in 3.12.
+                )                                                                         # Inline: new in 3.12.
 
             if server_date_row is None:
                 print(f"Current date not returned. server_date_row set to None.")
@@ -284,7 +306,7 @@ async def query_logs(
 
     pool: Pool | None = None
     try:
-        pool = await PgPoolManager.get_pool(settings)  # Targets resolved DB
+        pool = await PgPoolManager.get_pool(settings)                                     # Targets resolved DB
     except RuntimeError:
         if settings is None:
             err_string: str = "PG pool not initialised; check settings."
@@ -294,6 +316,5 @@ async def query_logs(
     if not pool is None:
         return await execute_query(pool, query, params=params, fetch=True)
 
-
-#  LocalWords:  ValueError tstamp asctime loglvl RuntimeError LogRecord async inits
-#  LocalWords:  ResolvedSettingsDict PgPoolManager
+    #  LocalWords:  ValueError tstamp asctime loglvl RuntimeError LogRecord async inits
+    #  LocalWords:  ResolvedSettingsDict PgPoolManager
