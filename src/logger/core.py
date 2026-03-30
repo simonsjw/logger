@@ -7,8 +7,6 @@ Lazy setup for PG: pool init and table creation on first log emission.
 Provides query access to logs table.
 """
 
-from __future__ import annotations
-
 import asyncio
 import gzip
 import json
@@ -16,17 +14,13 @@ import logging
 import logging.handlers
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 
-import debugpy
-import nest_asyncio
 from asyncpg import Pool, PostgresConnectionError, Record
-
-if TYPE_CHECKING:
-    from infopypg.pgtypes import ResolvedSettingsDict
-
-nest_asyncio.apply()
+from infopypg.pgtypes import ResolvedSettingsDict
 
 script_dir: str = os.path.dirname(os.path.abspath(__file__))
 log_path: str = os.path.normpath(
@@ -36,7 +30,6 @@ log_dir: str = os.path.dirname(log_path)                                        
 os.makedirs(log_dir, exist_ok=True)                                                       # creates logger/log if needed
 
 
-# LogEncoder is used in _async_emit below.
 class LogEncoder(json.JSONEncoder):
     """
     Custom encoder for log objects, falling back to str for non-serialisable types.
@@ -48,7 +41,7 @@ class LogEncoder(json.JSONEncoder):
 
 def setup_logger(
     logger_name: str | None = None,
-    log_location: str | ResolvedSettingsDict = log_path,
+    log_location: str | dict[str, str | list[str]] | ResolvedSettingsDict = log_path,
     log_file_maximum_size: int = 10 * 1024 * 1024,                                        # 10MB
     backup_count: int = 10,
     log_level: int = logging.DEBUG,
@@ -63,8 +56,8 @@ def setup_logger(
     ----------
     logger_name : str | None
         Name for the logger (defaults to root if None).
-    log_location : str | ResolvedSettingsDict
-        File path or DB settings dict.
+    log_location : str | dict[str, str | list[str]] | ResolvedSettingsDict
+        File path, DB settings dict or resolved settings dict.
     log_file_maximum_size : int
         Max file size before rotation (file mode only).
     backup_count : int
@@ -150,12 +143,13 @@ class PostgreSQLHandler(logging.Handler):
     """
     Async PostgreSQL logging handler.
 
-    Lazily inits PgPoolManager  and ensures logs table on first emit.
-    Inserts logs async into logs table.
+    Lazily inits PgPoolManager and ensures logs table on first emit.
+
+    Safe to call from both sync and async contexts without nest_asyncio.
 
     Parameters
     ----------
-    settings : ResolvedSettingsDict
+    settings : dict[str, str | list[str]] | ResolvedSettingsDict
         Resolved PG connection settings.
 
     Returns
@@ -164,33 +158,90 @@ class PostgreSQLHandler(logging.Handler):
         Emits logs to PG.
     """
 
-    def __init__(self, settings: ResolvedSettingsDict) -> None:
+    _executor: ThreadPoolExecutor | None = None                                           # Class-level executor
+
+    def __init__(
+        self, settings: dict[str, str | list[str]] | ResolvedSettingsDict
+    ) -> None:
         super().__init__()
-        self.settings = settings
+
+        from infopypg import is_ResolvedSettingsDict
+
+        self.resolved_settings: ResolvedSettingsDict
+        self.settings: dict[str, str | list[str]] | None
+
+        if is_ResolvedSettingsDict(settings):
+            self.resolved_settings = settings
+        else:
+            self.settings = cast(dict[str, str | list[str]], settings)
         self._initialized = False
 
     async def _ensure_setup(self) -> None:
         """
         Lazy setup: init pool, ensure table/infra.
         """
+        from infopypg import (
+            DatabaseBuilder,
+            SettingsDict,
+            async_resolve_SettingsDict_to_ResolvedSettingsDict,
+            is_ResolvedSettingsDict,
+            validate_dict_to_SettingsDict,
+        )
+
         if self._initialized:
             return
 
-        from infopypg import DatabaseBuilder, PgPoolManager
+        if self.settings:
+            # create a ResolvedSettingsDict to use for capturing a connection pool.
+            settings_dict: SettingsDict = validate_dict_to_SettingsDict(self.settings)
+            resolved_settings_candidate: (
+                ResolvedSettingsDict | None
+            ) = await async_resolve_SettingsDict_to_ResolvedSettingsDict(settings_dict)
+            if resolved_settings_candidate:
+                self.resolved_settings = resolved_settings_candidate
+            else:
+                raise ConnectionError("Failed to resolve provided settings_dict")
+        else:
+            self.settings = cast(
+                dict[str, str | list[str]],
+                {k.lower(): v for k, v in self.resolved_settings.items()},
+            )
 
-        # Ensure infra and logs table via setupdb
+            # Ensure infra and logs table via setupdb
         spec_path: str = script_dir + "/log_spec.py"
+
         builder = DatabaseBuilder(
             spec_path=spec_path,                                                          # Assumes in same dir; adjust path if needed
-            resolved_settings=self.settings,
+            settings_dictionary=self.settings,
         )
+
         await builder.build()                                                             # Incremental: creates missing TS/DB/exts/tables
 
         self._initialized = True
 
+    @classmethod
+    def _get_executor(cls) -> ThreadPoolExecutor:
+        """
+        Get or create the class-level executor.
+
+        Returns
+        -------
+        ThreadPoolExecutor
+            Single-worker executor for sync emits.
+        """
+        if cls._executor is None:
+            cls._executor = ThreadPoolExecutor(max_workers=1)
+            assert cls._executor is not None                                              # Narrow type for return
+        return cls._executor
+
     def emit(self, record: logging.LogRecord) -> None:
         """
-        Emit log record to PG async.
+        Emit log record to PG without ever nesting event loops.
+
+        Flow:
+        - If in async context (running loop), schedule insert as task.
+        - If in sync context (no running loop), offload async insert to
+          background thread via executor.
 
         Parameters
         ----------
@@ -204,11 +255,10 @@ class PostgreSQLHandler(logging.Handler):
         """
         try:
             loop = asyncio.get_running_loop()
-            asyncio.create_task(
-                self._async_emit(record)
-            )                                                                             # Fire-and-forget in async context
-        except RuntimeError:                                                              # No running loop (sync context, e.g., module init)
-            asyncio.run(self._async_emit(record))                                         # Run blocking in sync context
+            loop.create_task(self._async_emit(record))
+        except RuntimeError:                                                              # No running loop → synchronous context
+            executor = self._get_executor()
+            executor.submit(asyncio.run, self._async_emit(record))
 
     async def _async_emit(self, record: logging.LogRecord) -> None:
         """
@@ -216,11 +266,33 @@ class PostgreSQLHandler(logging.Handler):
 
         Handles explicit tstamp to satisfy partitioning routing before defaults.
         Uses UTC for consistency with likely server config; adjust if server timezone differs.
-        """
-        await self._ensure_setup()
-        from datetime import date, datetime, timezone
 
+        Flow:
+        1. Ensure setup (lazy init pool/table).
+        2. Serialise optional obj to JSON.
+        3. Get UTC timestamp.
+        4. Acquire pool connection.
+        5. Fetch server date for partition.
+        6. Ensure partition exists.
+        7. Execute insert.
+
+        Parameters
+        ----------
+        record : logging.LogRecord
+            Log record to insert.
+
+        Raises
+        ------
+        ValueError
+            If server date fetch fails.
+        ConnectionError
+            If no resolved settings.
+        Exception
+            On partition creation or insert failure (printed to stderr).
+        """
         from infopypg import PgPoolManager, ensure_partition_exists
+
+        await self._ensure_setup()
 
         obj: Any | None = record.__dict__.get("obj")                                      # From extra={"obj": data}
         obj_json: str | None = (
@@ -236,23 +308,28 @@ class PostgreSQLHandler(logging.Handler):
             VALUES ($1, $2, $3, $4, $5)
         """
         params = [tstamp, record.levelname, record.name, record.msg, obj_json]
-        pool = await PgPoolManager.get_pool(self.settings)                                # Targets resolved DB
+
+        if not hasattr(self, "resolved_settings"):
+            raise ConnectionError("No resolved connection settings for the database.")
+
+        pool = await PgPoolManager.get_pool(
+            self.resolved_settings
+        )                                                                                 # Targets resolved DB
 
         async with pool.acquire() as conn:
             # Get server current date for partition
-            server_date_row = None
+            server_date_row: Record | None = None
             try:
-                server_date_row: Record | None = await conn.fetchrow(
-                    "SELECT current_date AS today;"
-                )
+                server_date_row = await conn.fetchrow("SELECT current_date AS today;")
             except PostgresConnectionError as e:
-                print(
-                    f"database did not return the current date: {e}", file=sys.stderr
-                )                                                                         # Inline: new in 3.12.
+                print(f"database did not return the current date: {e}", file=sys.stderr)
 
             if server_date_row is None:
-                print(f"Current date not returned. server_date_row set to None.")
-                raise ValueError
+                print(
+                    "Current date not returned. server_date_row set to None.",
+                    file=sys.stderr,
+                )
+                raise ValueError("Server date fetch failed.")
 
             try:
                 server_date = server_date_row["today"]
@@ -275,7 +352,7 @@ class PostgreSQLHandler(logging.Handler):
 
 async def query_logs(
     query: str,
-    settings: ResolvedSettingsDict,
+    resolved_settings: ResolvedSettingsDict,
     params: list[Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
@@ -287,7 +364,7 @@ async def query_logs(
         SQL query (e.g., "SELECT * FROM logs WHERE loglvl = $1").
     params : list[Any] | None
         Parameters for the query (optional).
-    settings : ResolvedSettingsDict | None
+    resolved_settings : ResolvedSettingsDict
         PG settings if not already initialised via logger.
 
     Returns
@@ -300,21 +377,16 @@ async def query_logs(
     RuntimeError
         If PG not initialised and no settings provided.
     """
-
-    # Lazy init of infopypg.
     from infopypg import PgPoolManager, execute_query
 
     pool: Pool | None = None
     try:
-        pool = await PgPoolManager.get_pool(settings)                                     # Targets resolved DB
+        pool = await PgPoolManager.get_pool(resolved_settings)                            # Targets resolved DB
     except RuntimeError:
-        if settings is None:
-            err_string: str = "PG pool not initialised; check settings."
-            print(err_string, file=sys.stderr)
-            raise RuntimeError(err_string)
+        err_string: str = "PG pool not initialised; check settings."
+        print(err_string, file=sys.stderr)
+        raise RuntimeError(err_string) from None
 
-    if not pool is None:
+    if pool is not None:
         return await execute_query(pool, query, params=params, fetch=True)
-
-    #  LocalWords:  ValueError tstamp asctime loglvl RuntimeError LogRecord async inits
-    #  LocalWords:  ResolvedSettingsDict PgPoolManager
+    return None

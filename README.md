@@ -9,7 +9,7 @@ This module provides a flexible logging setup for Python applications, supportin
 
 Key features:
 - **File-based logging**: Rotating logs with automatic gzip compression to save space; custom timestamps including microseconds.
-- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `infopypg`'s shared connection pool; lazily initialises the pool and automatically creates the table (and supporting infrastructure like tablespace and database) if missing via `setupdb`.
+- **PostgreSQL logging**: Asynchronous inserts into a `logs` table using `infopypg`'s shared connection pool; lazily initialises the pool and automatically creates the table (and supporting infrastructure) if missing via `DatabaseBuilder`.
 - Designed for the `grok` conda environment; assumes dependencies like `asyncpg` and `infopypg` are available. 
 
 Lazy loading is employed to avoid import cycles between `logger` and `infopypg`, with PostgreSQL setup deferred until the first log emission. This logger prioritises efficiency and modularity, avoiding duplicate handlers and using asynchronous operations for database interactions to minimise blocking.
@@ -55,25 +55,50 @@ logger = setup_logger()
 logger.info("Application started.")
 ```
 
-For PostgreSQL logging, pass a `ResolvedSettingsDict` (from `infopypg.pgtypes`):
+For PostgreSQL logging, pass a connection dictionary `dict[str, str | list[str]]` (from `infopypg`):
 
 ```python
 import logging
-from infopypg.pgtypes import ResolvedSettingsDict
 from logger import setup_logger
 
-settings: ResolvedSettingsDict = {
-    "DB_USER": "your_username",
-    "DB_HOST": "localhost",
-    "DB_PORT": "5432",
-    "DB_NAME": "your_database",
-    "PASSWORD": "your_password",
-    "TABLESPACE_NAME": "your_tablespace",      # Optional
-    "TABLESPACE_PATH": "/path/to/tablespace",  # Optional
-    "EXTENSIONS": ["pgcrypto"],                # Optional
+settings: dict = {
+  "db_user": "postgres",
+  "db_host": "127.0.0.1",
+  "db_port": "5432",
+  "db_name": "responsesdb",
+  "password": "foobar123",
+  "tablespace_name": "responses_db",
+  "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
+  "extensions": ["uuid-ossp", "pg_trgm"]
 }
 
 logger = setup_logger(log_location=settings, log_level=logging.DEBUG)
+logger.info("Info message.", extra={"obj": {"key": "value"}})
+```
+
+PostgreSQL can also be used by passing a resolved settings dictionary (from `infopypg`):
+
+```python
+import logging
+from infopypg import validate_dict_to_SettingsDict
+from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
+from logger import setup_logger
+
+settings: dict = {
+  "db_user": "postgres",
+  "db_host": "127.0.0.1",
+  "db_port": "5432",
+  "db_name": "responsesdb",
+  "password": "foobar123",
+  "tablespace_name": "responses_db",
+  "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
+  "extensions": ["uuid-ossp", "pg_trgm"]
+}
+
+validated_settings = validate_dict_to_SettingsDict(settings)
+resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(validated_settings)
+
+logger = setup_logger(log_location=resolved_settings, log_level=logging.DEBUG)
 logger.info("Info message.", extra={"obj": {"key": "value"}})
 ```
 
@@ -81,13 +106,13 @@ logger.info("Info message.", extra={"obj": {"key": "value"}})
 
 - **Function Parameters** (in `setup_logger`):
   - `logger_name`: Optional name for the logger (defaults to root).
-  - `log_location`: File path (str) or DB settings (`ResolvedSettingsDict`).
+  - `log_location`: File path (str), DB settings (`dict[str, str | list[str]]`) or resolved settings dictionary (`ResolvedSettingsDict`).
   - `log_file_maximum_size`: Max size (file mode only; default: 10MB).
   - `backup_count`: Backup count (file mode only; default: 10).
   - `log_level`: Logging level (int; default: DEBUG).
 
 For PostgreSQL mode:
-- The `logs` table is created if missing with columns: `idx` (BIGSERIAL PK), `tStamp` (TIMESTAMP WITH TIME ZONE), `loglvl` (TEXT), `logger` (TEXT), `message` (TEXT), `obj` (JSONB).
+- The `logs` table is created if missing with columns: `idx` (BIGINT IDENTITY), `tstamp` (TIMESTAMP WITH TIME ZONE), `loglvl` (TEXT), `logger` (TEXT), `message` (TEXT), `obj` (JSONB).
 - Infrastructure (tablespace, database, extensions) is ensured incrementally using `infopypg` tools.
 - Setup is lazy: Pool initialisation and table creation occur on the first log emission.
 
@@ -105,24 +130,42 @@ For PostgreSQL mode, query the `logs` table asynchronously using the module-leve
 ```python
 import asyncio
 from logger import query_logs
+from infopypg import validate_dict_to_SettingsDict
+from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
 
+settings: dict = {
+  "db_user": "postgres",
+  "db_host": "127.0.0.1",
+  "db_port": "5432",
+  "db_name": "responsesdb",
+  "password": "foobar123",
+  "tablespace_name": "responses_db",
+  "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
+  "extensions": ["uuid-ossp", "pg_trgm"]
+}
+
+validated_settings = validate_dict_to_SettingsDict(settings)
+resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(validated_settings)
+        
 async def main():
-    results = await query_logs("SELECT * FROM logs WHERE loglvl = $1 LIMIT 10", params=["INFO"])
+    results = await query_logs(
+        "SELECT * FROM logs WHERE loglvl = $1 LIMIT 10", 
+        resolved_settings,
+        params=["INFO"]
+    )
     print(results)  # list[dict[str, Any]]
 
 asyncio.run(main())
 ```
-
-Provide `settings` if the pool is not yet initialised.
 
 ## Examples
 
 ### File Logging with Rotation
 
 ```python
-from logging import Logger, setup_logger, INFO
+from logger import setup_logger, INFO
 
-logger: Logger = setup_logger(log_level=INFO)
+logger = setup_logger(log_level=INFO)
 logger.warning("This will rotate when file exceeds max size.")
 ```
 
@@ -145,8 +188,8 @@ This inserts into the `logs` table with `obj` as JSONB.
   │       ├── __init__.pyi  # Type stubs 
   │       ├── core.py       # Implementation of the logger functionality.
   │       ├── core.pyi      # Type stubs
-  │       ├── logs_spec.py  # SQLAlchemy model spec for logs table (used in setupdb)
-  │       └── logs_spec.py  # Type stubs
+  │       ├── log_spec.py   # SQLAlchemy model spec for logs table (used in DatabaseBuilder)
+  │       └── log_spec.pyi  # Type stubs
   ├── pyproject.toml        # Config for ruff, pyrefly, etc.
   └── README.md             # This file
   ```
@@ -155,26 +198,26 @@ This inserts into the `logs` table with `obj` as JSONB.
 - **Testing**: Add tests in a future `tests/` directory; currently, rely on examples in docstrings.
 
 ## Full list of exposed functionality
-All elements below can be imported from logger. 
+
+All elements below can be imported from `logger`.
 
 ```python
-from logger import(
+from logger import (
     # Core logging library objects: 
-        setup_logger,    # setup the logger
-        query_logs,      # query logs set up on postgres. 
+    setup_logger,    # setup the logger
+    query_logs,      # query logs set up on postgres. 
         
-    # All following objects are unchanged from the base `logger' library.
-    
-        DEBUG,           # logging levels to use in setup_logger.
-        INFO, 
-        WARNING, 
-        CRITICAL, 
-        ERROR,
+    # All following objects are unchanged from the base `logging` library.
+    DEBUG,           # logging levels to use in setup_logger.
+    INFO, 
+    WARNING, 
+    CRITICAL, 
+    ERROR,
 
-        Logger,          # type for the Logger returned by `setup_logger'
-        
-    )
+    Logger,          # type for the Logger returned by `setup_logger`
+)
 ```
+
 ## Contributing
 
 Contributions are welcome! Please follow the code style in `__init__.py` (e.g., type hints, NumPy-style docstrings) and ensure compatibility with Python 3.12 and the `grok` environment.
@@ -185,4 +228,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-For questions or issues, contact the maintainer. Last updated: December 04, 2025.
+For questions or issues, contact the maintainer. Last updated: March 30, 2026.
