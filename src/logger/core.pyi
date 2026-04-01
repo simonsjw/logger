@@ -1,6 +1,8 @@
 import json
 import logging
 import logging.handlers
+from _typeshed import Incomplete
+from asyncpg import Pool as Pool, PostgresConnectionError as PostgresConnectionError
 from infopypg.pgtypes import ResolvedSettingsDict as ResolvedSettingsDict
 from typing import Any
 
@@ -17,8 +19,8 @@ class GzipRotatingFileHandler(logging.handlers.RotatingFileHandler):
     def doRollover(self) -> None: ...
 
 class PostgreSQLHandler(logging.Handler):
-    resolved_settings: ResolvedSettingsDict
-    settings: dict[str, str | list[str]] | None
+    settings: Incomplete
+    resolved_settings: ResolvedSettingsDict | None
     def __init__(self, settings: dict[str, str | list[str]] | ResolvedSettingsDict) -> None: ...
     def emit(self, record: logging.LogRecord) -> None: ...
 
