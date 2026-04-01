@@ -38,6 +38,9 @@ build-backend = "setuptools.build_meta" # Backend used for building
 
 [tool.setuptools.packages.find] # Configuration for finding packages
 where = ["src"] # Directories to search for packages
+[tool.pytest.ini_options]
+asyncio_mode = "auto"          # optional – your current setting is fine
+asyncio_default_fixture_loop_scope = "session"
 
 [tool.pyrefly] # Pyrefly tool configuration section
 # pyrefly settings 
