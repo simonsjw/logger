@@ -1,6 +1,6 @@
 from datetime import datetime as datetime
 from infopypg import Base
-from sqlalchemy import Index
+from sqlalchemy import Index as Index
 from sqlalchemy.orm import Mapped as Mapped
 from typing import Any
 
