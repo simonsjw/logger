@@ -285,16 +285,16 @@ class PostgreSQLHandler(logging.Handler):
 
         super().close()                                                                   # Always call the parent implementation
 
-        async def aclose(self) -> None:
-            """Asynchronous cleanup for explicit use in tests.
+    async def aclose(self) -> None:
+        """Asynchronous cleanup for explicit use in tests.
 
-            Call this method at the end of every PostgreSQL integration test
-            to ensure all pending _async_emit tasks are completed before
-            the test suite exits.
-            """
-            # Any additional async-specific cleanup can be added here in the future
-            # (e.g. closing a per-handler pool).
-            pass
+        Call this method at the end of every PostgreSQL integration test
+        to ensure all pending _async_emit tasks are completed before
+        the test suite exits.
+        """
+        # Any additional async-specific cleanup can be added here in the future
+        # (e.g. closing a per-handler pool).
+        self.close()
 
 
 async def query_logs(
