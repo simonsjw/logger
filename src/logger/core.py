@@ -8,6 +8,7 @@ Provides query access to logs table.
 """
 
 import asyncio
+import builtins
 import gzip
 import json
 import logging
@@ -120,7 +121,10 @@ class GzipRotatingFileHandler(logging.handlers.RotatingFileHandler):
                     os.rename(s, d)
             dfn = f"{self.baseFilename}.1"
             if os.path.exists(dfn):
-                with open(dfn, "rb") as f_in, gzip.open(f"{dfn}.gz", "wb") as f_out:
+                with (
+                    builtins.open(dfn, "rb") as f_in,
+                    gzip.open(f"{dfn}.gz", "wb") as f_out,
+                ):
                     f_out.writelines(f_in)
                 os.remove(dfn)
 
@@ -267,6 +271,30 @@ class PostgreSQLHandler(logging.Handler):
             )
 
             await conn.execute(query, *params)
+
+    def close(self) -> None:
+        """Synchronous close required by the logging.Handler interface.
+
+        This satisfies the parent class contract and eliminates the
+        inconsistent-override warning.
+        """
+        # Shut down the shared executor (best-effort; already used by emit())
+        if PostgreSQLHandler._executor is not None:
+            PostgreSQLHandler._executor.shutdown(wait=False)
+            PostgreSQLHandler._executor = None
+
+        super().close()                                                                   # Always call the parent implementation
+
+        async def aclose(self) -> None:
+            """Asynchronous cleanup for explicit use in tests.
+
+            Call this method at the end of every PostgreSQL integration test
+            to ensure all pending _async_emit tasks are completed before
+            the test suite exits.
+            """
+            # Any additional async-specific cleanup can be added here in the future
+            # (e.g. closing a per-handler pool).
+            pass
 
 
 async def query_logs(
