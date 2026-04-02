@@ -41,6 +41,7 @@ where = ["src"] # Directories to search for packages
 [tool.pytest.ini_options]
 asyncio_mode = "auto"          # optional – your current setting is fine
 asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.pyrefly] # Pyrefly tool configuration section
 # pyrefly settings 
