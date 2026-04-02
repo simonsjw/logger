@@ -148,6 +148,12 @@ async def test_postgres_handler_lazy_setup() -> None:
     print(f"\nPostgreSQL handler lazy setup completed in {duration:.2f} seconds")
     assert duration < 30.0, f"Setup took too long ({duration:.2f}s) – possible hang"
 
+    # Clean up handler tasks before the test ends
+    for handler in logger.handlers:
+        if isinstance(handler, PostgreSQLHandler):
+            await handler.aclose()
+            break
+
 
 @pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.skipif(
@@ -166,6 +172,12 @@ async def test_postgres_handler_setup_and_logging() -> None:
     logger.info(test_msg, extra={"obj": test_obj})
 
     await asyncio.sleep(0.5)                                                              # Allow async insert to complete
+
+    # Clean up handler tasks before the test ends
+    for handler in logger.handlers:
+        if isinstance(handler, PostgreSQLHandler):
+            await handler.aclose()
+            break
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -198,3 +210,9 @@ async def test_query_logs_function() -> None:
     assert results is not None
     assert isinstance(results, list)
     assert len(results) >= 0
+
+    # Clean up handler tasks before the test ends
+    for handler in logger.handlers:
+        if isinstance(handler, PostgreSQLHandler):
+            await handler.aclose()
+            break
