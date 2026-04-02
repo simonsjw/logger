@@ -186,27 +186,18 @@ async def test_postgres_handler_setup_and_logging() -> None:
     not os.getenv("POSTGRES_DB_TEST"),
     reason="Set POSTGRES_DB_TEST to run PostgreSQL tests",
 )
-async def test_query_logs_function() -> None:
+async def test_query_logs_function(
+    postgres_logger,
+) -> None:                                                                                # ← use the fixture-provided logger
     """Integration test for query_logs on the logs table."""
+    logger = postgres_logger                                                              # ← already fully set up by the fixture
+
+    logger.info("Triggering lazy infrastructure setup for query test")
+
+    # Resolve settings and run the query (table is guaranteed to exist)
     db_settings_str = os.getenv("POSTGRES_DB_TEST")
     raw_settings: dict[str, Any] = json.loads(db_settings_str)
 
-    # Create the logger (this registers the PostgreSQLHandler)
-    logger = setup_logger(log_location=raw_settings, log_level=INFO)
-
-    # Explicitly await full infrastructure setup (tables, pool, etc.)
-    for handler in logger.handlers:
-        if isinstance(handler, PostgreSQLHandler):
-            await handler._ensure_setup()                                                 # now safe to await directly
-            break
-    else:
-        pytest.fail("PostgreSQLHandler not found in logger")
-
-    logger.info(
-        "Triggering lazy infrastructure setup for query test"
-    )                                                                                     # optional log after setup
-
-    # Resolve settings and run the query (now guaranteed to succeed)
     validated = validate_dict_to_SettingsDict(raw_settings)
     resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(
         validated
@@ -221,7 +212,7 @@ async def test_query_logs_function() -> None:
     assert len(results) == 1
     assert "log_count" in results[0]
 
-    # Clean up handler tasks before the test ends
+    # Optional cleanup
     for handler in logger.handlers:
         if isinstance(handler, PostgreSQLHandler):
             await handler.aclose()
