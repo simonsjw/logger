@@ -45,6 +45,7 @@ from infopypg import validate_dict_to_SettingsDict
 from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
 
 from logger import INFO, query_logs, setup_logger
+from logger.core import PostgreSQLHandler
 
 
 @pytest.fixture
