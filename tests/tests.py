@@ -181,7 +181,7 @@ async def test_postgres_handler_setup_and_logging() -> None:
             break
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     not os.getenv("POSTGRES_DB_TEST"),
     reason="Set POSTGRES_DB_TEST to run PostgreSQL tests",
@@ -191,13 +191,22 @@ async def test_query_logs_function() -> None:
     db_settings_str = os.getenv("POSTGRES_DB_TEST")
     raw_settings: dict[str, Any] = json.loads(db_settings_str)
 
-    # Ensure table and infrastructure exist (idempotent)
+    # Create the logger (this registers the PostgreSQLHandler)
     logger = setup_logger(log_location=raw_settings, log_level=INFO)
+
+    # Explicitly await full infrastructure setup (tables, pool, etc.)
+    for handler in logger.handlers:
+        if isinstance(handler, PostgreSQLHandler):
+            await handler._ensure_setup()                                                 # now safe to await directly
+            break
+    else:
+        pytest.fail("PostgreSQLHandler not found in logger")
+
     logger.info(
         "Triggering lazy infrastructure setup for query test"
-    )                                                                                     # Forces DatabaseBuilder
+    )                                                                                     # optional log after setup
 
-    # Resolve to ResolvedSettingsDict (uppercase keys required by PgPoolManager)
+    # Resolve settings and run the query (now guaranteed to succeed)
     validated = validate_dict_to_SettingsDict(raw_settings)
     resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(
         validated
@@ -209,8 +218,8 @@ async def test_query_logs_function() -> None:
     )
 
     assert results is not None
-    assert isinstance(results, list)
-    assert len(results) >= 0
+    assert len(results) == 1
+    assert "log_count" in results[0]
 
     # Clean up handler tasks before the test ends
     for handler in logger.handlers:
