@@ -1,2 +1,3 @@
 src/logger.egg-info/
-src/logger/__pycache__/
+__pycache__
+.env
