@@ -61,7 +61,7 @@ async def test_query_logs_returns_data(db_settings: ResolvedSettingsDict) -> Non
     """
     rows = await query_logs(query, db_settings, params=["query_test"])
 
-    assert len(rows) > 0, "No rows returned from logs table after insert"
+    assert len(rows) > 0, f"No rows returned from logs table after insert. Rows: {rows}"
     assert any(row["message"] == "Test message for query" for row in rows)
 
 
