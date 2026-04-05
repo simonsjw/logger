@@ -13,6 +13,7 @@ from __future__ import (
 
 import asyncio
 import gzip
+import json
 import logging
 import logging.handlers
 import os
@@ -263,13 +264,13 @@ class Logger:
         try:
             await pool.execute(
                 """
-                INSERT INTO logs (level, message, logger_name, extra)
+                INSERT INTO logs (loglvl, logger, message, obj)
                 VALUES ($1, $2, $3, $4)
                 """,
                 level,
                 message,
                 self.name,
-                extra or {},
+                json.dumps(extra or {}),
             )
         except Exception as e:                                                            # pylint: disable=broad-except
             # Fallback to file logging to ensure the original message is never lost.
