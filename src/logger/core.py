@@ -248,6 +248,13 @@ class Logger:
     ) -> None:
         """Insert a log record into PostgreSQL if a pool is available.
 
+        Column names match the logs table created by infopypg:
+        loglvl (text), logger (text), message (text), obj (jsonb).
+
+        We explicitly use json.dumps() + ::jsonb cast because asyncpg
+        can raise "expected str, got dict" on JSONB columns in some
+        environments.
+
         Parameters
         ----------
         level : str
@@ -259,19 +266,19 @@ class Logger:
         """
         pool = await self._ensure_db_pool()
         if not pool:
-            print("No pool found.")
+            self.logger.error("No database pool available for logging")
             return
 
         try:
             await pool.execute(
                 """
                 INSERT INTO logs (loglvl, logger, message, obj)
-                VALUES ($1, $2, $3, $4)
+                VALUES ($1, $2, $3, $4::jsonb)
                 """,
-                level,
-                message,
-                self.name,
-                json.dumps(extra or {}),
+                level,                                                                    # $1 → loglvl
+                self.name,                                                                # $2 → logger
+                message,                                                                  # $3 → message
+                json.dumps(extra or {}),                                                  # $4 → obj
             )
         except Exception as e:                                                            # pylint: disable=broad-except
             # Fallback to file logging to ensure the original message is never lost.
