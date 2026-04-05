@@ -41,8 +41,8 @@ Full environment details are in `environment_grok.yml`. Linting and type-checkin
 ## Usage
 
 Import and set up the logger in your scripts using `setup_logger` with these optional arguments:
-- `logger_name`: str | None = None
-- `log_location`: str | ResolvedSettingsDict = "../logs/app.log" 
+- `name`: str | None = None
+- `db_settings`: str | ResolvedSettingsDict = "../logs/app.log" 
 - `log_file_maximum_size`: int = 10 * 1024 * 1024  # 10MB
 - `backup_count`: int = 10
 - `log_level`: int = logging.DEBUG
@@ -72,7 +72,7 @@ settings: dict = {
   "extensions": ["uuid-ossp", "pg_trgm"]
 }
 
-logger = setup_logger(log_location=settings, log_level=logging.DEBUG)
+logger = setup_logger(db_settings=settings, log_level=logging.DEBUG)
 logger.info("Info message.", extra={"obj": {"key": "value"}})
 ```
 
@@ -96,15 +96,15 @@ settings: dict = {
 
 settings = validate_dict_to_ResolvedSettingsDict(settings)
 
-logger = setup_logger(log_location=settings, log_level=logging.DEBUG)
+logger = setup_logger(db_settings=settings, log_level=logging.DEBUG)
 logger.info("Info message.", extra={"obj": {"key": "value"}})
 ```
 
 ### Configuration Options
 
 - **Function Parameters** (in `setup_logger`):
-  - `logger_name`: Optional name for the logger (defaults to root).
-  - `log_location`: File path (str), DB settings (`dict[str, str | list[str]]`) or resolved settings dictionary (`ResolvedSettingsDict`).
+  - `name`: Optional name for the logger (defaults to root).
+  - `db_settings`: File path (str), DB settings (`dict[str, str | list[str]]`) or resolved settings dictionary (`ResolvedSettingsDict`).
   - `log_file_maximum_size`: Max size (file mode only; default: 10MB).
   - `backup_count`: Backup count (file mode only; default: 10).
   - `log_level`: Logging level (int; default: DEBUG).
@@ -116,7 +116,7 @@ For PostgreSQL mode:
 
 ### Log Format
 
-- **File mode**: "[timestamp; level; funcName] message; logger_name;" with microseconds.
+- **File mode**: "[timestamp; level; funcName] message; name;" with microseconds.
 - **PostgreSQL mode**: Direct field inserts; no formatting needed.
 
 To include JSON objects: Use `extra={"obj": data}` in log calls (serialised to JSONB in DB).
