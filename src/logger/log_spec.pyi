@@ -1,8 +1,9 @@
 from datetime import datetime as datetime
+from typing import Any
+
 from infopypg import Base
 from sqlalchemy import Index as Index
 from sqlalchemy.orm import Mapped as Mapped
-from typing import Any
 
 class Logs(Base):
     __tablename__: str

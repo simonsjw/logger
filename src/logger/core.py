@@ -1,319 +1,351 @@
 #!/usr/bin/env python3
+# src/logger/core.py
 """
-Flexible logging module with file and PostgreSQL support.
+Core implementation of the configurable logger.
 
-Supports rotating file logs with gzip and async PostgreSQL inserts via infopypg.
-Lazy setup for PG: pool init and table creation on first log emission.
-Provides query access to logs table.
+Supports rotating file handlers with gzip compression and optional
+PostgreSQL logging via a pre-validated ResolvedSettingsDict from infopypg.
 """
+
+from __future__ import (
+    annotations,                                                                          # allows use of type hints before they are imported (resolved on import)
+)
 
 import asyncio
-import builtins
 import gzip
-import json
 import logging
 import logging.handlers
 import os
-import sys
-import threading                                                                          # Thread-safe lock for cross-context lazy setup
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from asyncpg import Pool, PostgresConnectionError, Record
-from infopypg.pgtypes import ResolvedSettingsDict
-
-script_dir: str = os.path.dirname(os.path.abspath(__file__))
-log_path: str = os.path.normpath(
-    os.path.join(script_dir, "..", "..", "log", "default.log")
-)
-log_dir: str = os.path.dirname(log_path)                                                  # logger/log
-os.makedirs(log_dir, exist_ok=True)                                                       # creates logger/log if needed
+# Lazy import of infopypg components to avoid potential circular imports.
+_infopypg = None
+_ResolvedSettingsDict = None
+_PgPoolManager = None
 
 
-class LogEncoder(json.JSONEncoder):
+def _lazy_import_infopypg() -> None:
+    """Perform lazy import of required infopypg components.
+
+    This defers loading until the database path is actually used,
+    improving startup performance when PostgreSQL logging is not required.
     """
-    Custom encoder for log objects, falling back to str for non-serialisable types.
-    """
+    global _infopypg, _ResolvedSettingsDict, _PgPoolManager
+    if _infopypg is None:
+        import infopypg
+        from infopypg import PgPoolManager, ResolvedSettingsDict
 
-    def default(self, o: Any) -> str:
-        return str(o)                                                                     # Fallback ensures arbitrary objects don't crash dumps.
-
-
-def setup_logger(
-    logger_name: str | None = None,
-    log_location: str | dict[str, str | list[str]] | ResolvedSettingsDict = log_path,
-    log_file_maximum_size: int = 10 * 1024 * 1024,                                        # 10MB
-    backup_count: int = 10,
-    log_level: int = logging.DEBUG,
-) -> logging.Logger:
-    """
-    Set up and return a configured logger.
-
-    For file mode: rotating with gzip compression.
-    For PG mode: custom async handler with lazy pool init and table ensure.
-
-    Parameters
-    ----------
-    logger_name : str | None
-        Name for the logger (defaults to root if None).
-    log_location : str | dict[str, str | list[str]] | ResolvedSettingsDict
-        File path, DB settings dict or resolved settings dict.
-    log_file_maximum_size : int
-        Max file size before rotation (file mode only).
-    backup_count : int
-        Number of backups to keep (file mode only).
-    log_level : int
-        Logging level (e.g., logging.DEBUG).
-
-    Returns
-    -------
-    logging.Logger
-        Configured logger instance.
-
-    Raises
-    ------
-    ValueError
-        If invalid log_location type.
-    """
-
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(log_level)
-
-    if isinstance(log_location, str):
-        # File mode: rotating with gzip
-        Path(log_location).parent.mkdir(parents=True, exist_ok=True)
-        handler = GzipRotatingFileHandler(
-            log_location,
-            maxBytes=log_file_maximum_size,
-            backupCount=backup_count,
-        )
-        formatter = logging.Formatter(
-            "[%(asctime)s; %(levelname)s; %(funcName)s] %(message)s; %(name)s;",
-            datefmt="%Y-%m-%d %H:%M:%S.%f",
-        )
-        handler.setFormatter(formatter)
-    else:                                                                                 # PG mode
-        handler = PostgreSQLHandler(settings=log_location)
-
-    logger.addHandler(handler)
-    return logger
+        _infopypg = infopypg
+        _ResolvedSettingsDict = ResolvedSettingsDict
+        _PgPoolManager = PgPoolManager
 
 
 class GzipRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """
-    Rotating file handler with gzip compression on rollover.
-    """
+    """Rotating file handler that automatically compresses rotated logs with gzip."""
 
     def doRollover(self) -> None:
+        """Perform log rollover and compress the previous file with gzip.
+
+        Flow:
+            1. Close the current stream.
+            2. Rename the log file with a timestamp suffix.
+            3. Compress the renamed file using gzip.
+            4. Delete the uncompressed rotated file.
+            5. Open a new log file for continued writing.
         """
-        Perform rollover: close, compress old, rename.
-        """
-        super().doRollover()
-        if self.backupCount > 0:
-            for i in range(self.backupCount - 1, 0, -1):
-                s = f"{self.baseFilename}.{i}.gz"
-                d = f"{self.baseFilename}.{i+1}.gz"
-                if os.path.exists(s):
-                    if os.path.exists(d):
-                        os.remove(d)
-                    os.rename(s, d)
-            dfn = f"{self.baseFilename}.1"
-            if os.path.exists(dfn):
-                with (
-                    builtins.open(dfn, "rb") as f_in,
-                    gzip.open(f"{dfn}.gz", "wb") as f_out,
-                ):
+        if self.stream:
+            self.stream.close()
+            self.stream = None                                                            # type: ignore
+
+        if os.path.exists(self.baseFilename):
+            # Generate unique timestamped filename for the rotated log.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            rotated_filename = f"{self.baseFilename}.{timestamp}"
+
+            os.rename(self.baseFilename, rotated_filename)
+
+            # Compress using gzip and remove the uncompressed version.
+            with open(rotated_filename, "rb") as f_in:
+                with gzip.open(f"{rotated_filename}.gz", "wb") as f_out:
                     f_out.writelines(f_in)
-                os.remove(dfn)
+
+            os.remove(rotated_filename)
+
+            # Re-open for the next logging cycle.
+        self.stream = self._open()                                                        # type: ignore
 
 
-class PostgreSQLHandler(logging.Handler):
+class Logger:
+    """Configurable logger supporting file rotation and optional PostgreSQL persistence.
+
+    The database path is only activated when a pre-validated ResolvedSettingsDict
+    is supplied at construction.
     """
-    Async PostgreSQL logging handler.
-
-    Uses threading.Lock + double-check to guarantee one-time initialisation,
-    eliminating repeated import/registration of Logs and the SAWarning.
-    """
-
-    _executor: ThreadPoolExecutor | None = None                                           # Class-level executor
 
     def __init__(
-        self, settings: dict[str, str | list[str]] | ResolvedSettingsDict
+        self,
+        name: str = "app",
+        log_level: int = logging.INFO,
+        log_dir: str | None = None,
+        max_bytes: int = 10 * 1024 * 1024,                                                # 10 MiB
+        backup_count: int = 5,
+        db_settings: _ResolvedSettingsDict | None = None,                                 # type: ignore
     ) -> None:
-        super().__init__()
+        """Initialise the Logger instance.
 
-        self.settings = settings
-        self.resolved_settings: ResolvedSettingsDict | None = None
-        self._initialized: bool = False
-        self._setup_lock: threading.Lock = (
-            threading.Lock()
-        )                                                                                 # Thread-safe across event loops
+        Parameters
+        ----------
+        name : str, optional
+            Name of the logger (default: "app").
+        log_level : int, optional
+            Logging level (default: logging.INFO).
+        log_dir : str | None, optional
+            Directory for log files. If None, a "logs" subdirectory
+            is created in the current working directory.
+        max_bytes : int, optional
+            Maximum size of each log file before rotation (default: 10 MiB).
+        backup_count : int, optional
+            Number of rotated files to retain (default: 5).
+        db_settings : _ResolvedSettingsDict | None, optional (the global set one time
+            by _lazy_import_infopypg
+            Pre-validated database settings from infopypg.
+            If None, database logging is disabled.
 
-    async def _ensure_setup(self) -> None:
+        Flow
+        ----
+        1. Configure file paths and create log directory.
+        2. Set up the standard logging.Logger with gzip rotation.
+        3. Store the provided ResolvedSettingsDict for lazy pool creation.
         """
-        Lazy one-time setup: resolve settings and run DatabaseBuilder exactly once.
+        _lazy_import_infopypg()
+
+        self.name = name
+        self.log_level = log_level
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+
+        # Resolve log directory and ensure it exists.
+        if log_dir is None:
+            log_dir = os.path.join(os.getcwd(), "logs")
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        self.log_file = self.log_dir / f"{name}.log"
+
+        # Initialise the underlying logger and attach handler once.
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(log_level)
+
+        if not self.logger.handlers:
+            self._setup_file_handler()
+
+            # Pre-validated settings (None disables DB logging).
+        self._db_settings: _ResolvedSettingsDict | None = db_settings
+        self._pool = None
+
+    def _setup_file_handler(self) -> None:
+        """Configure and attach the gzip-rotating file handler.
+
+        This method is called only once during initialisation to avoid
+        duplicate handlers.
         """
-        if self._initialized:
-            return
+        handler = GzipRotatingFileHandler(
+            str(self.log_file),
+            maxBytes=self.max_bytes,
+            backupCount=self.backup_count,
+        )
 
-        if self._setup_lock.locked():                                                     # Double-check pattern
-            return
+        formatter = logging.Formatter(
+            "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
-        with self._setup_lock:                                                            # Thread-safe one-time setup
-            if self._initialized:
-                return
-
-            from infopypg import DatabaseBuilder, SettingsDict
-            from infopypg.psqlhelpers import (
-                async_resolve_SettingsDict_to_ResolvedSettingsDict,
-                validate_dict_to_SettingsDict,
-            )
-
-            if isinstance(self.settings, dict) and "host" in str(self.settings).lower():
-                settings_dict: SettingsDict = validate_dict_to_SettingsDict(
-                    self.settings
-                )
-                self.resolved_settings = (
-                    await async_resolve_SettingsDict_to_ResolvedSettingsDict(
-                        settings_dict
-                    )
-                )
-            else:
-                self.resolved_settings = self.settings                                    # Already resolved
-
-            if self.resolved_settings is None:
-                raise ConnectionError("Failed to resolve database settings")
-
-            # Lazy import of model – breaks circular import while guaranteeing
-            # registration happens only once (inside the locked block).
-            from .log_spec import Logs                                                    # noqa: F401  # model registration side-effect
-
-            spec_path: str = str(Path(script_dir) / "log_spec.py")
-            builder = DatabaseBuilder(
-                spec_path=spec_path,
-                settings_dictionary=self.settings,
-            )
-            await builder.build()                                                         # Incremental and idempotent
-
-            self._initialized = True
-
-    @classmethod
-    def _get_executor(cls) -> ThreadPoolExecutor:
-        """
-        Get or create the class-level executor.
+    async def _ensure_db_pool(self) -> Any | None:
+        """Lazily acquire the PostgreSQL connection pool.
 
         Returns
         -------
-        ThreadPoolExecutor
-            Single-worker executor for sync emits.
-        """
-        if cls._executor is None:
-            cls._executor = ThreadPoolExecutor(max_workers=1)
-            assert cls._executor is not None                                              # Narrow type for return
-        return cls._executor
+        Any | None
+            The asyncpg pool object if db_settings was provided,
+            otherwise None.
 
-    def emit(self, record: logging.LogRecord) -> None:
+        Flow
+        ----
+        1. Return cached pool if already created.
+        2. Skip if no settings were supplied.
+        3. Perform lazy import of infopypg.
+        4. Acquire pool via PgPoolManager.get_pool (pools are cached internally).
         """
-        Emit log record to PG without ever nesting event loops.
+        if self._pool is not None:
+            return self._pool
+
+        if not self._db_settings:
+            return None
+
+        _lazy_import_infopypg()
+        assert _PgPoolManager is not None
+
+        self._pool = await _PgPoolManager.get_pool(self._db_settings)
+        return self._pool
+
+    def info(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an INFO level message to the file handler only.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context dictionary passed to the logger.
         """
+        self.logger.info(message, extra=extra)
+
+    def error(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an ERROR level message to the file handler only.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context dictionary passed to the logger.
+        """
+        self.logger.error(message, extra=extra)
+
+    async def ainfo(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an INFO level message asynchronously to both file and database.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context (will be stored in the database if configured).
+        """
+        self.logger.info(message, extra=extra)
+        await self._log_to_db("INFO", message, extra)
+
+    async def aerror(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an ERROR level message asynchronously to both file and database.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context (will be stored in the database if configured).
+        """
+        self.logger.error(message, extra=extra)
+        await self._log_to_db("ERROR", message, extra)
+
+    async def _log_to_db(
+        self, level: str, message: str, extra: dict[str, Any] | None
+    ) -> None:
+        """Insert a log record into PostgreSQL if a pool is available.
+
+        Parameters
+        ----------
+        level : str
+            Log level string (e.g., "INFO", "ERROR").
+        message : str
+            The primary log message.
+        extra : dict[str, Any] | None
+            Optional extra context dictionary.
+        """
+        pool = await self._ensure_db_pool()
+        if not pool:
+            return
+
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._async_emit(record))
-        except RuntimeError:                                                              # No running loop → sync context
-            executor = self._get_executor()
-            executor.submit(asyncio.run, self._async_emit(record))
-
-    async def _async_emit(self, record: logging.LogRecord) -> None:
-        """
-        Async insert log record.
-        """
-        from infopypg import PgPoolManager, ensure_partition_exists
-
-        await self._ensure_setup()
-
-        obj: Any | None = record.__dict__.get("obj")
-        obj_json: str | None = (
-            json.dumps(obj, cls=LogEncoder) if obj is not None else None
-        )
-
-        tstamp = datetime.now(timezone.utc)
-
-        query = """
-            INSERT INTO logs (tstamp, loglvl, logger, message, obj)
-            VALUES ($1, $2, $3, $4, $5)
-        """
-        params = [tstamp, record.levelname, record.name, record.msg, obj_json]
-
-        if self.resolved_settings is None:
-            raise ConnectionError("No resolved connection settings for the database.")
-
-        pool = await PgPoolManager.get_pool(self.resolved_settings)
-
-        async with pool.acquire() as conn:
-            # Get server current date for partition
-            server_date_row: Record | None = await conn.fetchrow(
-                "SELECT current_date AS today;"
+            await pool.execute(
+                """
+                INSERT INTO logs (level, message, logger_name, extra)
+                VALUES ($1, $2, $3, $4)
+                """,
+                level,
+                message,
+                self.name,
+                extra or {},
             )
+        except Exception as e:                                                            # pylint: disable=broad-except
+            # Fallback to file logging to ensure the original message is never lost.
+            self.logger.error("Failed to write log to database: %s", e)
 
-            if server_date_row is None:
-                raise ValueError("Server date fetch failed.")
 
-            server_date = server_date_row["today"]
-            await ensure_partition_exists(
-                pool,
-                "logs",
-                target_date=server_date,
-                partition_key="tstamp",
-                range_interval="daily",
-                look_ahead_days=1,
-            )
+def setup_logger(
+    name: str = "app",
+    log_level: int = logging.INFO,
+    log_dir: str | None = None,
+    db_settings: _ResolvedSettingsDict | None = None,                                     # type: ignore
+) -> Logger:
+    """Create and return a configured Logger instance.
 
-            await conn.execute(query, *params)
+    This is the recommended high-level entry point for most users.
 
-    def close(self) -> None:
-        """Synchronous close required by the logging.Handler interface.
+    Parameters
+    ----------
+    name : str, optional
+        Logger name (default: "app").
+    log_level : int, optional
+        Logging level (default: logging.INFO).
+    log_dir : str | None, optional
+        Directory for log files.
+    db_settings : _ResolvedSettingsDict | None, optional
+        Pre-validated database settings from infopypg.
 
-        This satisfies the parent class contract and eliminates the
-        inconsistent-override warning.
-        """
-        # Shut down the shared executor (best-effort; already used by emit())
-        if PostgreSQLHandler._executor is not None:
-            PostgreSQLHandler._executor.shutdown(wait=False)
-            PostgreSQLHandler._executor = None
-
-        super().close()                                                                   # Always call the parent implementation
-
-    async def aclose(self) -> None:
-        """Asynchronous cleanup for explicit use in tests.
-
-        Call this method at the end of every PostgreSQL integration test
-        to ensure all pending _async_emit tasks are completed before
-        the test suite exits.
-        """
-        # Any additional async-specific cleanup can be added here in the future
-        # (e.g. closing a per-handler pool).
-        self.close()
+    Returns
+    -------
+    Logger
+        Fully initialised logger ready for synchronous or asynchronous use.
+    """
+    return Logger(
+        name=name,
+        log_level=log_level,
+        log_dir=log_dir,
+        db_settings=db_settings,
+    )
 
 
 async def query_logs(
     query: str,
-    resolved_settings: ResolvedSettingsDict,
+    db_settings: _ResolvedSettingsDict,
     params: list[Any] | None = None,
-) -> list[dict[str, Any]] | None:
-    """
-    Query the logs table asynchronously.
-    """
-    from infopypg import PgPoolManager, execute_query
+) -> list[dict[str, Any]]:
+    """Execute an asynchronous query against the logs table.
 
-    try:
-        pool = await PgPoolManager.get_pool(resolved_settings)
-    except RuntimeError:
-        err_string: str = "PG pool not initialised; check settings."
-        print(err_string, file=sys.stderr)
-        raise RuntimeError(err_string) from None
+    Parameters
+    ----------
+    query : str
+        SQL query string (use $1, $2, ... placeholders for asyncpg).
+    db_settings : _ResolvedSettingsDict
+        Pre-validated database settings.
+    params : list[Any] | None, optional
+        Parameters to substitute into the query.
 
-    if pool is not None:
-        return await execute_query(pool, query, params=params, fetch=True)
-    return None
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of result rows as dictionaries.
+
+    Raises
+    ------
+    Exception
+        Propagates any database errors.
+    """
+    _lazy_import_infopypg()
+    assert _PgPoolManager is not None
+
+    pool = await _PgPoolManager.get_pool(db_settings)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *(params or ()))
+        return [dict(row) for row in rows]
+
+    # Alias for backward compatibility with older code that may import get_logger.
+
+
+get_logger = setup_logger
