@@ -1,45 +1,63 @@
+#!/usr/bin/env python3
 # tests/conftest.py
+"""
+Pytest configuration and fixtures for the logger package.
+
+Fixtures supply consistent Logger instances and a pre-validated
+ResolvedSettingsDict using the POSTGRES_DB_TEST environment variable.
+"""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
 from typing import Any
 
 import pytest
-import pytest_asyncio
-from infopypg import validate_dict_to_SettingsDict
-from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
+from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
 
-from logger import setup_logger
-from logger.core import PostgreSQLHandler
+from logger import Logger, setup_logger
 
 
-@pytest_asyncio.fixture(scope="session")
-async def postgres_logger() -> logging.Logger:
-    """Session-scoped fixture that guarantees the 'logs' table exists
-    and returns a fully initialised logger (PostgreSQLHandler already set up).
+@pytest.fixture(scope="session")
+def minimal_db_settings_dict() -> dict[str, Any]:
+    """Return a raw dictionary parsed from the POSTGRES_DB_TEST environment
+    variable.
+
+    The environment variable contains a JSON string with uppercase keys and
+    an extensions list. This fixture parses it once per session for efficiency.
     """
-    db_settings_str = os.getenv("POSTGRES_DB_TEST")
-    if not db_settings_str:
-        pytest.skip(
-            "POSTGRES_DB_TEST environment variable not set – skipping PostgreSQL tests"
-        )
-        # pytest.skip will prevent the fixture from being used; the return is never reached
+    env_str = os.getenv("POSTGRES_DB_TEST")
+    if not env_str:
+        raise RuntimeError("POSTGRES_DB_TEST environment variable is not set.")
 
-    raw_settings: dict[str, Any] = json.loads(db_settings_str)
+    # Parse JSON and ensure correct types
+    data: dict[str, Any] = json.loads(env_str)
 
-    # Validate settings (matches exactly what the handler expects)
-    validated = validate_dict_to_SettingsDict(raw_settings)
-    await async_resolve_SettingsDict_to_ResolvedSettingsDict(validated)
+    return data
 
-    # Register the logger exactly once
-    logger = setup_logger(log_location=raw_settings, log_level="INFO")
 
-    # Force table creation + pool setup (this is the library's official path)
-    for handler in logger.handlers:
-        if isinstance(handler, PostgreSQLHandler):
-            await handler._ensure_setup()
-            break
-    else:
-        pytest.fail("PostgreSQLHandler not found in logger.handlers")
+@pytest.fixture(scope="session")
+def db_settings(minimal_db_settings_dict: dict[str, Any]) -> ResolvedSettingsDict:
+    """Return a fully validated ResolvedSettingsDict for use in tests.
 
-    return logger
+    Validation and normalisation occur once per test session.
+    """
+    return validate_dict_to_ResolvedSettingsDict(minimal_db_settings_dict)
+
+
+@pytest.fixture
+def logger_no_db() -> Logger:
+    """Return a Logger instance with file logging only (no database)."""
+    return setup_logger(name="test_no_db", log_level=logging.DEBUG)
+
+
+@pytest.fixture
+def logger_with_db(db_settings: ResolvedSettingsDict) -> Logger:
+    """Return a Logger instance configured with PostgreSQL logging."""
+    return setup_logger(
+        name="test_with_db",
+        log_level=logging.DEBUG,
+        db_settings=db_settings,
+    )

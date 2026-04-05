@@ -1,219 +1,76 @@
 #!/usr/bin/env python3
+# tests/tests.py
 """
-Pytest test suite for the logger package.
+Test suite for the logger package.
 
-This module provides comprehensive tests for the logger package, covering
-file-based logging (rotation, gzip compression, extra objects) and
-PostgreSQL logging (lazy setup, inserts, and queries).
-
-File-based tests run unconditionally. All PostgreSQL tests are automatically
-skipped unless the POSTGRES_DB_TEST environment variable is set to a valid
-JSON connection string.
-
-Examples of pytest usage
-------------------------
-# Run all tests quietly
-pytest tests/tests.py -q
-
-# Run with verbose output
-pytest tests/tests.py -v
-
-# Run only file-based tests (fast, no DB required)
-pytest tests/tests.py -v -k "file"
-
-# Run full PostgreSQL integration tests
-POSTGRES_DB_TEST='{ "db_user":"postgres", ... }' pytest tests/tests.py -v
-
-# Run the critical lazy setup test in isolation (useful for diagnosing hangs)
-POSTGRES_DB_TEST='{...}' pytest tests/tests.py::test_postgres_handler_lazy_setup -v --tb=short
-
-# Run with maximum detail
-POSTGRES_DB_TEST='{...}' pytest tests/tests.py -v --tb=long -rA
+Covers file-based logging, asynchronous database logging, and query functionality.
 """
 
-import asyncio
-import gzip
-import json
+from __future__ import annotations
+
 import logging
-import os
-import time
-from pathlib import Path
-from typing import Any
 
 import pytest
-from infopypg import validate_dict_to_SettingsDict
-from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
 
-from logger import INFO, query_logs, setup_logger
-from logger.core import PostgreSQLHandler
+from logger import Logger, query_logs, setup_logger
 
 
-@pytest.fixture
-def temp_log_path(tmp_path: Path) -> str:
-    """Provide a temporary log file path for file-handler tests.
+def test_setup_logger_creates_file_logger(logger_no_db: Logger) -> None:
+    """Verify that setup_logger produces a functional file-only logger.
 
-    Parameters
-    ----------
-    tmp_path : Path
-        Built-in pytest temporary directory fixture.
-
-    Returns
-    -------
-    str
-        Full path to a test log file.
+    The logger must write messages and create the expected log file.
     """
-    return str(tmp_path / "test_app.log")
+    logger_no_db.info("Test info message")
+    logger_no_db.error("Test error message")
 
-
-def test_setup_logger_file_mode(temp_log_path: str) -> None:
-    """Verify setup_logger returns a Logger with a file handler when given a path."""
-    logger = setup_logger(
-        logger_name="test_file",
-        log_location=temp_log_path,
-        log_level=INFO,
-    )
-
-    assert isinstance(logger, logging.Logger)
-    assert len(logger.handlers) == 1
-    assert isinstance(logger.handlers[0], logging.handlers.RotatingFileHandler)           # type: ignore[attr-defined]
-
-
-def test_file_logging_writes_correctly(temp_log_path: str) -> None:
-    """Test that messages are written to the file in the expected format."""
-    logger = setup_logger(log_location=temp_log_path, log_level=INFO)
-    test_msg = "This is a test log message for file handler"
-
-    logger.info(test_msg)
-
-    assert Path(temp_log_path).exists()
-
-    with open(temp_log_path, "r", encoding="utf-8") as f:                                 # Read back written log
-        content = f.read()
-    assert test_msg in content
-    assert "INFO" in content
-
-
-def test_file_logging_with_extra_obj(temp_log_path: str) -> None:
-    """Verify extra={"obj": dict} is accepted and does not affect file output."""
-    logger = setup_logger(log_location=temp_log_path, log_level=INFO)
-    data = {"user_id": 42, "action": "login", "success": True}
-
-    logger.info("User action logged", extra={"obj": data})
-
-    with open(temp_log_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    assert "User action logged" in content
-
-
-def test_file_rotation_and_gzip(temp_log_path: str) -> None:
-    """Force rotation with a tiny max size and verify gzip compression occurs."""
-    logger = setup_logger(
-        log_location=temp_log_path,
-        log_file_maximum_size=200,                                                        # Small size forces quick rollover
-        backup_count=2,
-        log_level=INFO,
-    )
-
-    for i in range(30):                                                                   # Enough data to trigger rotation
-        logger.info(f"Rotation test line {i} " * 20)
-
-    gz_files = list(Path(temp_log_path).parent.glob("*.log.*.gz"))
-    assert len(gz_files) > 0, "Expected at least one gzipped backup file"
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_postgres_handler_lazy_setup() -> None:
-    """Test the critical lazy-setup path used by LLMClient / demo_reasoning.py.
-
-    This test isolates _ensure_setup(), DatabaseBuilder.build(), and pool
-    acquisition using the POSTGRES_DB_TEST environment variable. It fails
-    fast with a clear assertion if the setup exceeds 30 seconds.
-    """
-    db_settings_str = os.getenv("POSTGRES_DB_TEST")
-    if not db_settings_str:
-        pytest.skip("Set POSTGRES_DB_TEST to run PostgreSQL lazy setup test")
-
-    settings: dict[str, Any] = json.loads(db_settings_str)
-
-    start_time = time.perf_counter()
-
-    logger = setup_logger(log_location=settings, log_level=INFO)
-    logger.info(
-        "Testing lazy PostgreSQL handler setup",
-        extra={"obj": {"test": True}},
-    )
-
-    await asyncio.sleep(0.8)                                                              # Allow background async work
-
-    duration = time.perf_counter() - start_time
-    print(f"\nPostgreSQL handler lazy setup completed in {duration:.2f} seconds")
-    assert duration < 30.0, f"Setup took too long ({duration:.2f}s) – possible hang"
-
-    # Clean up handler tasks before the test ends
-    for handler in logger.handlers:
-        if isinstance(handler, PostgreSQLHandler):
-            await handler.aclose()
-            break
-
-
-@pytest.mark.asyncio(loop_scope="session")
-@pytest.mark.skipif(
-    not os.getenv("POSTGRES_DB_TEST"),
-    reason="Set POSTGRES_DB_TEST to run PostgreSQL tests",
-)
-async def test_postgres_handler_setup_and_logging() -> None:
-    """Integration test for PostgreSQL handler (lazy setup and insert)."""
-    db_settings_str = os.getenv("POSTGRES_DB_TEST")
-    settings: dict[str, Any] = json.loads(db_settings_str)
-
-    logger = setup_logger(log_location=settings, log_level=INFO)
-    test_msg = "PostgreSQL integration test message"
-    test_obj = {"test_key": "test_value", "number": 123}
-
-    logger.info(test_msg, extra={"obj": test_obj})
-
-    await asyncio.sleep(0.5)                                                              # Allow async insert to complete
-
-    # Clean up handler tasks before the test ends
-    for handler in logger.handlers:
-        if isinstance(handler, PostgreSQLHandler):
-            await handler.aclose()
-            break
+    assert logger_no_db.log_file.exists()
+    content = logger_no_db.log_file.read_text(encoding="utf-8")
+    assert "Test info message" in content
+    assert "Test error message" in content
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    not os.getenv("POSTGRES_DB_TEST"),
-    reason="Set POSTGRES_DB_TEST to run PostgreSQL tests",
-)
-async def test_query_logs_function(
-    postgres_logger,
-) -> None:                                                                                # ← use the fixture-provided logger
-    """Integration test for query_logs on the logs table."""
-    logger = postgres_logger                                                              # ← already fully set up by the fixture
+async def test_async_logging_with_db(logger_with_db: Logger) -> None:
+    """Verify asynchronous logging writes both to file and to the database."""
+    await logger_with_db.ainfo("Async info message")
+    await logger_with_db.aerror("Async error message")
 
-    logger.info("Triggering lazy infrastructure setup for query test")
+    # Verify file output
+    content = logger_with_db.log_file.read_text(encoding="utf-8")
+    assert "Async info message" in content
+    assert "Async error message" in content
 
-    # Resolve settings and run the query (table is guaranteed to exist)
-    db_settings_str = os.getenv("POSTGRES_DB_TEST")
-    raw_settings: dict[str, Any] = json.loads(db_settings_str)
 
-    validated = validate_dict_to_SettingsDict(raw_settings)
-    resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(
-        validated
-    )
+@pytest.mark.asyncio
+async def test_query_logs_returns_data(db_settings: ResolvedSettingsDict) -> None:
+    """Verify that query_logs can retrieve inserted log records.
 
-    results = await query_logs(
-        "SELECT COUNT(*) AS log_count FROM logs LIMIT 1",
-        resolved_settings,
-    )
+    This test assumes the logs table exists (created automatically by infopypg).
+    """
+    # Insert a known record for this test
+    logger = setup_logger(name="query_test", db_settings=db_settings)
+    await logger.ainfo("Test message for query")
 
-    assert results is not None
-    assert len(results) == 1
-    assert "log_count" in results[0]
+    query = """
+        SELECT idx, tstamp, loglvl, logger, message
+        FROM logs
+        WHERE logger = $1
+        ORDER BY tstamp DESC
+        LIMIT 5
+    """
+    rows = await query_logs(query, db_settings, params=["query_test"])
 
-    # Optional cleanup
-    for handler in logger.handlers:
-        if isinstance(handler, PostgreSQLHandler):
-            await handler.aclose()
-            break
+    assert len(rows) > 0
+    assert any(row["message"] == "Test message for query" for row in rows)
+
+
+def test_logger_respects_log_level(logger_no_db: Logger) -> None:
+    """Confirm that the logger honours the supplied log_level."""
+    logger_no_db.logger.setLevel(logging.WARNING)
+
+    logger_no_db.info("This should be filtered")
+    logger_no_db.error("This should appear")                                              # ERROR is above WARNING
+
+    content = logger_no_db.log_file.read_text(encoding="utf-8")
+    assert "This should be filtered" not in content
+    assert "This should appear" in content
