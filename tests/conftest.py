@@ -15,9 +15,12 @@ import os
 from typing import Any
 
 import pytest
+from dotenv import load_dotenv
 from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
 
 from logger import Logger, setup_logger
+
+load_dotenv()
 
 
 @pytest.fixture(scope="session")
