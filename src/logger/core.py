@@ -259,6 +259,7 @@ class Logger:
         """
         pool = await self._ensure_db_pool()
         if not pool:
+            print("No pool found.")
             return
 
         try:
