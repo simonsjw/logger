@@ -12,7 +12,7 @@ import logging
 
 import pytest
 
-from logger import Logger, query_logs, setup_logger
+from logger.core import Logger, query_logs, setup_logger
 
 
 def test_setup_logger_creates_file_logger(logger_no_db: Logger) -> None:
@@ -45,14 +45,15 @@ async def test_async_logging_with_db(logger_with_db: Logger) -> None:
 async def test_query_logs_returns_data(db_settings: ResolvedSettingsDict) -> None:
     """Verify that query_logs can retrieve inserted log records.
 
-    This test assumes the logs table exists (created automatically by infopypg).
+    This test inserts a record then queries it back using the correct
+    column names from the logs table (loglvl, logger, message, obj).
     """
     # Insert a known record for this test
     logger = setup_logger(name="query_test", db_settings=db_settings)
     await logger.ainfo("Test message for query")
 
     query = """
-        SELECT idx, tstamp, loglvl, logger, message
+        SELECT idx, tstamp, loglvl, logger, message, obj
         FROM logs
         WHERE logger = $1
         ORDER BY tstamp DESC
@@ -60,7 +61,7 @@ async def test_query_logs_returns_data(db_settings: ResolvedSettingsDict) -> Non
     """
     rows = await query_logs(query, db_settings, params=["query_test"])
 
-    assert len(rows) > 0
+    assert len(rows) > 0, "No rows returned from logs table after insert"
     assert any(row["message"] == "Test message for query" for row in rows)
 
 

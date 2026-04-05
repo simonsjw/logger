@@ -22,17 +22,16 @@ from logger import Logger, setup_logger
 
 @pytest.fixture(scope="session")
 def minimal_db_settings_dict() -> dict[str, Any]:
-    """Return a raw dictionary parsed from the POSTGRES_DB_TEST environment
-    variable.
+    """Return a raw dictionary parsed from the POSTGRES_DB_TEST
+    environment variable.
 
-    The environment variable contains a JSON string with uppercase keys and
-    an extensions list. This fixture parses it once per session for efficiency.
+    This fixture parses the JSON string once per session for efficiency.
+    Port is converted to integer; extensions remain a list.
     """
     env_str = os.getenv("POSTGRES_DB_TEST")
     if not env_str:
         raise RuntimeError("POSTGRES_DB_TEST environment variable is not set.")
 
-    # Parse JSON and ensure correct types
     data: dict[str, Any] = json.loads(env_str)
 
     return data
@@ -42,7 +41,7 @@ def minimal_db_settings_dict() -> dict[str, Any]:
 def db_settings(minimal_db_settings_dict: dict[str, Any]) -> ResolvedSettingsDict:
     """Return a fully validated ResolvedSettingsDict for use in tests.
 
-    Validation and normalisation occur once per test session.
+    Validation occurs once per test session.
     """
     return validate_dict_to_ResolvedSettingsDict(minimal_db_settings_dict)
 
