@@ -205,6 +205,18 @@ class Logger:
         """
         self.logger.info(message, extra=extra)
 
+    def warning(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an WARNING level message to the file handler only.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context dictionary passed to the logger.
+        """
+        self.logger.warning(message, extra=extra)
+
     def error(self, message: str, extra: dict[str, Any] | None = None) -> None:
         """Log an ERROR level message to the file handler only.
 
@@ -229,6 +241,19 @@ class Logger:
         """
         self.logger.info(message, extra=extra)
         await self._log_to_db("INFO", message, extra)
+
+    async def awarning(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        """Log an WARNING level message asynchronously to both file and database.
+
+        Parameters
+        ----------
+        message : str
+            The log message.
+        extra : dict[str, Any] | None, optional
+            Additional context (will be stored in the database if configured).
+        """
+        self.logger.warning(message, extra=extra)
+        await self._log_to_db("WARNING", message, extra)
 
     async def aerror(self, message: str, extra: dict[str, Any] | None = None) -> None:
         """Log an ERROR level message asynchronously to both file and database.
