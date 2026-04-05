@@ -80,8 +80,7 @@ PostgreSQL can also be used by passing a resolved settings dictionary (from `inf
 
 ```python
 import logging
-from infopypg import validate_dict_to_SettingsDict
-from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
+from infopypg import validate_dict_to_ResolvedSettingsDict
 from logger import setup_logger
 
 settings: dict = {
@@ -95,10 +94,9 @@ settings: dict = {
   "extensions": ["uuid-ossp", "pg_trgm"]
 }
 
-validated_settings = validate_dict_to_SettingsDict(settings)
-resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(validated_settings)
+settings = validate_dict_to_ResolvedSettingsDict(settings)
 
-logger = setup_logger(log_location=resolved_settings, log_level=logging.DEBUG)
+logger = setup_logger(log_location=settings, log_level=logging.DEBUG)
 logger.info("Info message.", extra={"obj": {"key": "value"}})
 ```
 
@@ -130,8 +128,7 @@ For PostgreSQL mode, query the `logs` table asynchronously using the module-leve
 ```python
 import asyncio
 from logger import query_logs
-from infopypg import validate_dict_to_SettingsDict
-from infopypg.psqlhelpers import async_resolve_SettingsDict_to_ResolvedSettingsDict
+from infopypg import validate_dict_to_ResolvedSettingsDict
 
 settings: dict = {
   "db_user": "postgres",
@@ -144,8 +141,7 @@ settings: dict = {
   "extensions": ["uuid-ossp", "pg_trgm"]
 }
 
-validated_settings = validate_dict_to_SettingsDict(settings)
-resolved_settings = await async_resolve_SettingsDict_to_ResolvedSettingsDict(validated_settings)
+resolved_settings = validate_dict_to_ResolvedSettingsDict(settings)
         
 async def main():
     results = await query_logs(
